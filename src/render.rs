@@ -2,7 +2,7 @@
 use crate::genome::*;
 use crate::sim::*;
 use crate::util::*;
-use crate::vegetation::{Form, PlantLineage};
+use crate::vegetation::*;
 use rand::{Rng as _, SeedableRng};
 use rustc_hash::FxHashMap;
 
@@ -76,37 +76,222 @@ pub struct Sprite {
     pub px: Vec<[u8; 4]>,
 }
 
-pub fn plant_sprite(p: &PlantLineage, growth: u8) -> Sprite {
+/// Seasonal look of a lineage: 0 = in leaf, 1 = autumn colours, 2 = bare (deciduous plants only).
+pub fn leaf_phase(p: &PlantLineage, t: i64) -> u8 {
+    if p.g[DECIDUOUS] < 0.5 {
+        return 0;
+    }
+    match (t % SEASON) * 8 / SEASON {
+        5 => 1,     // late autumn
+        6 | 7 => 2, // winter
+        _ => 0,
+    }
+}
+
+fn new_sprite(w: i32, h: i32) -> Vec<[u8; 4]> {
+    vec![[0u8; 4]; (w * h) as usize]
+}
+
+pub fn plant_sprite(p: &PlantLineage, growth: u8, phase: u8) -> Sprite {
     let mut rng = Rng::seed_from_u64(p.id as u64 * 7919 + growth as u64);
+    let g = &p.g;
     let form = p.form();
     let age = if growth < 3 { 0.7 } else { 1.0 };
     let rf = |r: &mut Rng| r.gen::<f32>();
-    if form == Form::Kelp {
-        let h = ((5.0 + p.height * 12.0) * age) as i32;
-        let (sw, sh) = (7, h + 1);
-        let mut px = vec![[0u8; 4]; (sw * sh) as usize];
-        let mut cv = Canvas { w: sw, h: sh, px: &mut px };
-        let (col, dark) = (hsv(p.hue, 60.0, 50.0), hsv(p.hue, 70.0, 35.0));
-        for strand in 0..(1 + (p.branching * 2.0) as i32) {
-            let x = 3 + strand - 1;
-            for y in 0..h {
-                let xx = x + ((y as f32 * 0.6 + strand as f32).sin() * (1.0 + p.droop)).round() as i32;
-                cv.set(xx, sh - 1 - y, if y % 3 != 0 { col } else { dark });
-            }
+    let leafc = |h: f32, s: f32, v: f32| -> Col {
+        match phase {
+            1 => hsv(18.0 + (g[HUE] * 7.0) % 30.0, 75.0, v + 15.0),
+            _ => hsv(h, s, v),
         }
-        return Sprite { w: sw, h: sh, ax: 3, ay: sh - 1, px };
+    };
+    let bloom = hsv(g[BLOOM_HUE], 70.0, 95.0);
+    let toxic = g[TOXIN] > 0.5;
+    let berry = hsv(270.0 + g[TOXIN] * 40.0, 80.0, 75.0);
+    match form {
+        Form::Kelp => {
+            let h = ((5.0 + g[HEIGHT] * 12.0) * age) as i32;
+            let (sw, sh) = (7, h + 1);
+            let mut px = new_sprite(sw, sh);
+            let mut cv = Canvas { w: sw, h: sh, px: &mut px };
+            let (col, dark) = (hsv(g[HUE], 60.0, 50.0), hsv(g[HUE], 70.0, 35.0));
+            for strand in 0..(1 + (g[BRANCHING] * 2.0) as i32) {
+                let x = 3 + strand - 1;
+                for y in 0..h {
+                    let xx = x + ((y as f32 * 0.6 + strand as f32).sin() * (1.0 + g[DROOP])).round() as i32;
+                    cv.set(xx, sh - 1 - y, if y % 3 != 0 { col } else { dark });
+                }
+            }
+            return Sprite { w: sw, h: sh, ax: 3, ay: sh - 1, px };
+        }
+        Form::Reed => {
+            // a clump of stalks with brown seed heads, at the waterline
+            let h = ((4.0 + g[HEIGHT] * 8.0) * age) as i32;
+            let (sw, sh) = (7, h + 2);
+            let mut px = new_sprite(sw, sh);
+            let mut cv = Canvas { w: sw, h: sh, px: &mut px };
+            let stalk = leafc(g[HUE] * 0.3 + 70.0, 45.0, 55.0);
+            let n = 2 + (g[BRANCHING] * 3.0) as i32;
+            for k in 0..n {
+                let x = 1 + (k * 5) / n.max(1);
+                let hh = h - (rf(&mut rng) * 3.0) as i32;
+                for y in 0..hh {
+                    cv.set(x + (y > hh - 3 && k % 2 == 0) as i32, sh - 1 - y, stalk);
+                }
+                cv.fill(x, sh - hh - 1, 1, 2, [120, 78, 45]);
+            }
+            return Sprite { w: sw, h: sh, ax: 3, ay: sh - 1, px };
+        }
+        Form::Cactus => {
+            let h = ((4.0 + g[HEIGHT] * 9.0) * age) as i32;
+            let (sw, sh) = (9, h + 1);
+            let mut px = new_sprite(sw, sh);
+            let mut cv = Canvas { w: sw, h: sh, px: &mut px };
+            let body = hsv(95.0 + (g[HUE] - 105.0) * 0.3, 45.0, 52.0);
+            let dark = hsv(100.0, 50.0, 36.0);
+            let base = sh - 1;
+            cv.fill(3, base - h + 1, 3, h, body);
+            cv.fill(5, base - h + 1, 1, h, dark);
+            let arms = (g[BRANCHING] * 3.0) as i32;
+            for a in 0..arms.min(2) {
+                let side = if a == 0 { -1 } else { 1 };
+                let ay = base - h / 2 + (rf(&mut rng) * 3.0) as i32 - 1;
+                let ax = if side < 0 { 1 } else { 6 };
+                cv.fill(ax, ay, 2, 1, body);
+                let up = 2 + (rf(&mut rng) * (h as f32 / 3.0)) as i32;
+                cv.fill(if side < 0 { 1 } else { 7 }, ay - up, 1, up, body);
+            }
+            if g[THORNS] > 0.3 {
+                for y in (base - h + 1..base).step_by(2) {
+                    cv.set(2, y, [230, 225, 200]);
+                    cv.set(6, y + 1, [230, 225, 200]);
+                }
+            }
+            if g[BLOOM] > 0.35 && growth >= 3 {
+                cv.fill(3, base - h, 3, 1, bloom);
+            }
+            return Sprite { w: sw, h: sh, ax: 4, ay: base, px };
+        }
+        Form::Vine => {
+            // twisting climber with leaves
+            let h = ((5.0 + g[HEIGHT] * 12.0) * age) as i32;
+            let (sw, sh) = (7, h + 1);
+            let mut px = new_sprite(sw, sh);
+            let mut cv = Canvas { w: sw, h: sh, px: &mut px };
+            let stem = hsv(80.0, 40.0, 35.0);
+            let leaf = leafc(g[HUE], 60.0, 50.0);
+            for y in 0..h {
+                let x = 3 + ((y as f32 * 0.7).sin() * 1.6).round() as i32;
+                cv.set(x, sh - 1 - y, stem);
+                if y % 3 == 1 && phase != 2 {
+                    cv.set(x + if y % 6 == 1 { 1 } else { -1 }, sh - 1 - y, leaf);
+                }
+                if g[BLOOM] > 0.4 && growth >= 3 && y % 7 == 5 {
+                    cv.set(x, sh - 2 - y, bloom);
+                }
+            }
+            return Sprite { w: sw, h: sh, ax: 3, ay: sh - 1, px };
+        }
+        Form::Flytrap => {
+            let (sw, sh) = (7, 5);
+            let mut px = new_sprite(sw, sh);
+            let mut cv = Canvas { w: sw, h: sh, px: &mut px };
+            let leaf = hsv(g[HUE], 55.0, 45.0);
+            cv.fill(1, 4, 5, 1, leaf);
+            for (x, y) in [(0, 2), (3, 1), (6, 2)] {
+                cv.set(x, y + 1, leaf);
+                cv.set(x, y, [200, 40, 50]);
+                cv.set(x + if x < 3 { 1 } else if x > 3 { -1 } else { 0 }, y - 1 + (x == 3) as i32, [235, 230, 200]);
+            }
+            return Sprite { w: sw, h: sh, ax: 3, ay: 4, px };
+        }
+        Form::Flower => {
+            let h = ((2.0 + g[HEIGHT] * 6.0) * age) as i32;
+            let (sw, sh) = (5, h + 3);
+            let mut px = new_sprite(sw, sh);
+            let mut cv = Canvas { w: sw, h: sh, px: &mut px };
+            let stem = hsv(g[HUE], 50.0, 45.0);
+            cv.fill(2, sh - h, 1, h, stem);
+            cv.set(1, sh - 2, stem);
+            if growth >= 3 && phase != 2 {
+                let top = sh - h - 1;
+                for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                    cv.set(2 + dx, top + dy, bloom);
+                }
+                cv.set(2, top, [250, 220, 90]);
+            }
+            return Sprite { w: sw, h: sh, ax: 2, ay: sh - 1, px };
+        }
+        Form::Conifer => {
+            let h = ((8.0 + g[HEIGHT] * 14.0) * age) as i32;
+            let half = ((2.0 + g[BRANCHING] * 4.0 + g[DENSITY] * 2.0) * age) as i32;
+            let (sw, sh) = (2 * half + 3, h + 2);
+            let mut px = new_sprite(sw, sh);
+            let mut cv = Canvas { w: sw, h: sh, px: &mut px };
+            let (cx, base) = (sw / 2, sh - 1);
+            let needle = hsv(g[HUE] * 0.4 + 90.0, 55.0, 30.0 + g[DENSITY] * 12.0);
+            let light = hsv(g[HUE] * 0.4 + 95.0, 45.0, 45.0 + g[DENSITY] * 10.0);
+            cv.fill(cx, base - 2, 1, 3, [92, 64, 40]);
+            let tiers = 3 + (g[BRANCHING] * 3.0) as i32;
+            for y in 0..h - 2 {
+                let fy = y as f32 / (h - 2) as f32; // 0 bottom .. 1 top
+                let tier_pos = (fy * tiers as f32).fract();
+                let wdt = ((1.0 - fy) * half as f32 * (0.55 + 0.45 * (1.0 - tier_pos))).round() as i32;
+                let yy = base - 2 - y;
+                cv.fill(cx - wdt, yy, 2 * wdt + 1, 1, needle);
+                if wdt > 0 {
+                    cv.set(cx - wdt, yy, light);
+                }
+            }
+            cv.set(cx, base - h + 1, light);
+            if toxic {
+                cv.set(cx + 1, base - h / 2, berry);
+            }
+            return Sprite { w: sw, h: sh, ax: cx, ay: base, px };
+        }
+        Form::Palm => {
+            let h = ((8.0 + g[HEIGHT] * 12.0) * age) as i32;
+            let fr = ((4.0 + g[CROWN] * 5.0) * age) as i32;
+            let (sw, sh) = (2 * fr + 5, h + fr / 2 + 3);
+            let mut px = new_sprite(sw, sh);
+            let mut cv = Canvas { w: sw, h: sh, px: &mut px };
+            let (cx, base) = (sw / 2, sh - 1);
+            let bend = (g[DROOP] * 3.0) as i32;
+            let mut topx = cx;
+            for y in 0..h {
+                let x = cx + (bend as f32 * (y as f32 / h as f32).powi(2)) as i32;
+                cv.set(x, base - y, if y % 2 == 0 { [120, 92, 60] } else { [96, 72, 46] });
+                topx = x;
+            }
+            let top = base - h;
+            let frond = leafc(g[HUE], 60.0, 42.0);
+            for k in 0..(4 + (g[DENSITY] * 3.0) as i32) {
+                let a = std::f32::consts::PI * (0.05 + 0.9 * k as f32 / (3.0 + g[DENSITY] * 3.0));
+                for t in 0..fr {
+                    let x = topx as f32 - a.cos() * t as f32;
+                    let y = top as f32 - a.sin() * t as f32 * 0.6 + (t * t) as f32 * 0.08;
+                    cv.set(x as i32, y as i32, frond);
+                }
+            }
+            if g[BLOOM] > 0.4 && growth >= 3 {
+                cv.fill(topx - 1, top + 1, 3, 1, hsv(30.0, 70.0, 55.0)); // coconuts
+            }
+            return Sprite { w: sw, h: sh, ax: cx, ay: base, px };
+        }
+        _ => {}
     }
+    // broadleaf tree / shrub
     let tree = form == Form::Tree;
-    let trunk_h = ((if tree { 3.0 + p.height * 9.0 } else { 1.0 + p.height * 2.0 }) * age) as i32;
-    let cw = ((2.0 + p.crown * 6.0 + p.branching * 2.0) * if tree { 1.0 } else { 0.7 } * age).max(1.5);
-    let ch = ((3.0 + (1.0 - p.crown) * 7.0 + p.height * 3.0) * if tree { 1.0 } else { 0.55 } * age).max(2.0);
-    let sw = (2.0 * cw + 5.0 + p.droop * 4.0) as i32;
-    let sh = (trunk_h as f32 + ch + 3.0 + p.droop * ch) as i32;
-    let mut px = vec![[0u8; 4]; (sw * sh) as usize];
+    let trunk_h = ((if tree { 3.0 + g[HEIGHT] * 9.0 } else { 1.0 + g[HEIGHT] * 2.0 }) * age) as i32;
+    let cw: f32 = ((2.0 + g[CROWN] * 6.0 + g[BRANCHING] * 2.0) * if tree { 1.0 } else { 0.7 } * age).max(1.5);
+    let ch: f32 = ((3.0 + (1.0 - g[CROWN]) * 7.0 + g[HEIGHT] * 3.0) * if tree { 1.0 } else { 0.55 } * age).max(2.0);
+    let sw = (2.0 * cw + 5.0 + g[DROOP] * 4.0) as i32;
+    let sh = (trunk_h as f32 + ch + 3.0 + g[DROOP] * ch) as i32;
+    let mut px = new_sprite(sw, sh);
     let mut cv = Canvas { w: sw, h: sh, px: &mut px };
     let (cx, base) = (sw / 2, sh - 1);
-    let (bark, bark2) = (hsv(25.0 + p.hue * 0.05, 50.0, 38.0), hsv(25.0, 45.0, 26.0));
-    let girth = 1 + (p.girth > 0.45) as i32 + (p.girth > 0.8 && tree) as i32;
+    let bark_v = if g[FIRE_RES] > 0.5 { 30.0 } else { 38.0 }; // thick dark bark
+    let (bark, bark2) = (hsv(25.0 + g[HUE] * 0.05, 50.0, bark_v), hsv(25.0, 45.0, 26.0));
+    let girth = 1 + (g[GIRTH] > 0.45) as i32 + (g[GIRTH] > 0.8 && tree) as i32;
     for y in 0..(trunk_h + (ch * 0.4) as i32) {
         for k in 0..girth {
             cv.set(cx - girth / 2 + k, base - y, if k == 0 { bark2 } else { bark });
@@ -117,51 +302,83 @@ pub fn plant_sprite(p: &PlantLineage, growth: u8) -> Sprite {
         cv.set(cx + girth - girth / 2, base, bark2);
     }
     let top = base - trunk_h;
-    for b in 0..(1 + (p.branching * 4.0) as i32) {
+    let limbs = 1 + (g[BRANCHING] * 4.0) as i32 + if phase == 2 { 2 } else { 0 };
+    for b in 0..limbs {
         let side = if b % 2 == 1 { -1 } else { 1 };
         let by = top - (rf(&mut rng) * ch * 0.6) as i32;
         let ln = (cw * (0.4 + rf(&mut rng) * 0.6)) as i32;
         for t in 0..ln {
             let x = cx + side * t;
-            let y = by - (t as f32 * (1.0 - p.crown) * 0.8) as i32 + (t as f32 * p.droop * 0.5) as i32;
+            let y = by - (t as f32 * (1.0 - g[CROWN]) * 0.8) as i32 + (t as f32 * g[DROOP] * 0.5) as i32;
             cv.set(x, y, bark);
         }
     }
-    let leaf = hsv(p.hue, 50.0 + p.density * 25.0, 40.0 + p.density * 15.0);
-    let light = hsv(p.hue + 8.0, 40.0 + p.density * 20.0, 62.0 + p.density * 15.0);
-    let shadow = hsv(p.hue - 6.0, 65.0, 26.0 + p.density * 8.0);
+    if phase == 2 {
+        // bare winter crown: a fan of branches with twigs, dusted with snow
+        let n = 5 + (g[BRANCHING] * 4.0) as i32;
+        for b in 0..n {
+            let a = std::f32::consts::PI * (0.12 + 0.76 * b as f32 / (n - 1) as f32);
+            let len = ch * 0.95 * (0.7 + 0.3 * rf(&mut rng));
+            let (mut ex, mut ey) = (cx as f32, top as f32);
+            for t in 0..len as i32 {
+                ex = cx as f32 - a.cos() * t as f32 * (cw / len.max(1.0)).max(0.6);
+                ey = top as f32 - a.sin() * t as f32 + (t as f32 * g[DROOP] * 0.4);
+                cv.set(ex as i32, ey as i32, bark);
+            }
+            cv.set(ex as i32 + 1, ey as i32 - 1, bark2);
+            cv.set(ex as i32, ey as i32 - 1, [225, 232, 238]);
+        }
+    }
+    let leaf = leafc(g[HUE], 50.0 + g[DENSITY] * 25.0, 40.0 + g[DENSITY] * 15.0);
+    let light = leafc(g[HUE] + 8.0, 40.0 + g[DENSITY] * 20.0, 62.0 + g[DENSITY] * 15.0);
+    let shadow = leafc(g[HUE] - 6.0, 65.0, 26.0 + g[DENSITY] * 8.0);
     let ccy = top as f32 - ch * 0.55;
-    let clusters = (6.0 + p.density * 14.0 + p.branching * 6.0) as i32;
+    let clusters = (6.0 + g[DENSITY] * 14.0 + g[BRANCHING] * 6.0) as i32;
     for _ in 0..clusters {
         let a = rf(&mut rng) * std::f32::consts::TAU;
         let r = rf(&mut rng).powf(0.6);
         let mut dx = a.cos() * r * cw;
         let vy = a.sin() * r * ch * 0.5;
-        if p.crown < 0.4 && vy < 0.0 {
-            dx *= (0.5 + vy / ch + (1.0 - p.crown) * 0.2).max(0.15);
+        if g[CROWN] < 0.4 && vy < 0.0 {
+            dx *= (0.5 + vy / ch + (1.0 - g[CROWN]) * 0.2).max(0.15);
         }
         let (x, y) = ((cx as f32 + dx) as i32, (ccy + vy) as i32);
-        let rad = 1.max((1.0 + p.density * 2.0 * rf(&mut rng) + if tree { 1.0 } else { 0.0 }) as i32);
+        let rad = 1.max((1.0 + g[DENSITY] * 2.0 * rf(&mut rng) + if tree { 1.0 } else { 0.0 }) as i32);
+        let roll = rf(&mut rng);
+        if phase == 2 {
+            continue; // bare winter branches
+        }
         cv.circle(x, y + 1, rad, shadow);
         cv.circle(x, y, rad, leaf);
-        if (y as f32) < ccy && rf(&mut rng) < 0.6 {
+        if (y as f32) < ccy && roll < 0.6 {
             cv.set(x - rad / 2, y - rad / 2, light);
         }
-        if p.droop > 0.45 && rf(&mut rng) < p.droop {
-            for t in 0..(p.droop * ch * 0.9) as i32 {
+        if g[DROOP] > 0.45 && rf(&mut rng) < g[DROOP] {
+            for t in 0..(g[DROOP] * ch * 0.9) as i32 {
                 let yy = y + rad + t;
                 if yy < base - 1 {
                     cv.set(x, yy, if t % 2 == 1 { leaf } else { shadow });
                 }
             }
         }
+        if g[THORNS] > 0.5 && rf(&mut rng) < g[THORNS] {
+            cv.set(x + rad, y, [225, 220, 195]); // thorn tips at the crown edge
+        }
     }
-    if p.bloom > 0.35 && growth >= 3 {
-        let bc = hsv(p.bloom_hue, 70.0, 95.0);
-        for _ in 0..(p.bloom * 10.0) as i32 {
-            let a = rf(&mut rng) * std::f32::consts::TAU;
-            let r = rf(&mut rng).sqrt();
-            cv.set((cx as f32 + a.cos() * r * cw) as i32, (ccy + a.sin() * r * ch * 0.45) as i32, bc);
+    if phase != 2 {
+        if g[BLOOM] > 0.35 && growth >= 3 {
+            for _ in 0..(g[BLOOM] * 10.0) as i32 {
+                let a = rf(&mut rng) * std::f32::consts::TAU;
+                let r = rf(&mut rng).sqrt();
+                cv.set((cx as f32 + a.cos() * r * cw) as i32, (ccy + a.sin() * r * ch * 0.45) as i32, bloom);
+            }
+        }
+        if toxic && growth >= 3 {
+            for _ in 0..(g[TOXIN] * 5.0) as i32 {
+                let a = rf(&mut rng) * std::f32::consts::TAU;
+                let r = rf(&mut rng).sqrt() * 0.8;
+                cv.set((cx as f32 + a.cos() * r * cw) as i32, (ccy + a.sin() * r * ch * 0.4) as i32, berry);
+            }
         }
     }
     Sprite { w: sw, h: sh, ax: cx, ay: base, px }
@@ -349,12 +566,13 @@ pub struct WorldRenderer {
     pub px: Vec<[u8; 4]>,
     base: Vec<[u8; 4]>,
     base_key: (u64, usize),
-    pub sprites: FxHashMap<(u32, u8), Sprite>,
+    pub sprites: FxHashMap<(u32, u8, u8), Sprite>,
+    sprite_epoch: u32,
 }
 
 impl WorldRenderer {
     pub fn new() -> Self {
-        WorldRenderer { px: vec![], base: vec![], base_key: (u64::MAX, 0), sprites: FxHashMap::default() }
+        WorldRenderer { px: vec![], base: vec![], base_key: (u64::MAX, 0), sprites: FxHashMap::default(), sprite_epoch: 0 }
     }
 
     pub fn reset(&mut self) {
@@ -490,14 +708,16 @@ impl WorldRenderer {
             })
             .collect();
         trees.sort_unstable();
-        if self.sprites.len() > 8000 {
+        if self.sprites.len() > 12000 || self.sprite_epoch != s.vegetation.epoch {
             self.sprites.clear();
+            self.sprite_epoch = s.vegetation.epoch;
         }
         for i in trees {
             let iu = i as usize;
             let p = s.vegetation.lineage(iu);
-            let key = (p.id, s.pl[iu]);
-            let spr = self.sprites.entry(key).or_insert_with(|| plant_sprite(p, s.pl[iu]));
+            let phase = leaf_phase(p, s.t);
+            let key = (p.id, s.pl[iu], phase);
+            let spr = self.sprites.entry(key).or_insert_with(|| plant_sprite(p, s.pl[iu], phase));
             let (ox, oy) = ((iu % s.w) as i32 - spr.ax, (iu / s.w) as i32 - spr.ay);
             for yy in 0..spr.h {
                 for xx in 0..spr.w {

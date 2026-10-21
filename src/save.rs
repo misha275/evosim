@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-const MAGIC: &[u8] = b"EVOSIM-RS\x02\n";
+const MAGIC: &[u8] = b"EVOSIM-RS\x03\n";
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 pub struct View {
@@ -63,6 +63,9 @@ pub fn read_snapshot(path: &Path) -> Result<Snapshot, String> {
     let mut magic = vec![0u8; MAGIC.len()];
     f.read_exact(&mut magic).map_err(|e| e.to_string())?;
     if magic != MAGIC {
+        if magic.starts_with(b"EVOSIM-RS") {
+            return Err("save from an older EVOSIM version (plant genes changed)".into());
+        }
         return Err("not an EVOSIM (Rust) save".into());
     }
     let mut raw = Vec::new();

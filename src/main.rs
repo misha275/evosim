@@ -6,7 +6,7 @@ use evosim::render::{plant_sprite, portrait, WorldRenderer};
 use evosim::save::*;
 use evosim::sim::*;
 use evosim::util::{hsv, scale, Col};
-use evosim::vegetation::TRAITS as PLANT_TRAITS;
+use evosim::vegetation::{self as veg, TRAITS as PLANT_TRAITS};
 use macroquad::prelude::*;
 use parking_lot::{Mutex, MutexGuard};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -694,7 +694,10 @@ fn draw_plant_phylogeny(s: &Sim, tv: &mut TreeView, sprites: &mut WorldRenderer)
     let mut visible: std::collections::BTreeSet<usize> = veg
         .lineages
         .iter()
-        .filter(|p| veg.counts[p.id as usize] > 0 || (tv.ex && veg.peaks[p.id as usize] >= minpeak))
+        .filter(|p| {
+            let (c, pk) = (veg.counts[p.id as usize], veg.peaks[p.id as usize]);
+            c >= if tv.mn { 1 } else { 3 } || (tv.ex && pk >= minpeak.max(if tv.mn { 1 } else { 8 }))
+        })
         .map(|p| p.id as usize)
         .collect();
     // very large plant trees: keep the most populous living lineages + their ancestry
@@ -744,7 +747,7 @@ fn draw_plant_phylogeny(s: &Sim, tv: &mut TreeView, sprites: &mut WorldRenderer)
         }
         let live = veg.counts[i];
         let end = if live > 0 { s.t } else { veg.died[i].unwrap_or(p.born) };
-        let col = hsv(p.hue, 55.0, if live > 0 { 85.0 } else { 45.0 });
+        let col = hsv(p.g[veg::HUE], 55.0, if live > 0 { 85.0 } else { 45.0 });
         let (xs, xe) = (xf(p.born), xf(end));
         if let Some(par) = p.parent {
             if let Some(&py_) = rows.get(&(par as usize)) {
@@ -774,29 +777,57 @@ fn draw_plant_phylogeny(s: &Sim, tv: &mut TreeView, sprites: &mut WorldRenderer)
     }
     draw_rectangle(aw, 0.0, sw - aw, shh, c(BG));
     draw_line(aw, 0.0, aw, shh, 1.0, c([50, 56, 76]));
+    // census of living plant forms
+    let mut forms: std::collections::HashMap<veg::Form, u32> = Default::default();
+    for (i, l) in veg.lineages.iter().enumerate() {
+        if veg.counts[i] > 0 {
+            *forms.entry(l.form()).or_default() += veg.counts[i];
+        }
+    }
+    let mut fx = 10.0;
+    txt("forms:", fx, 28.0, FS, DIM);
+    fx += tw("forms:", FS) + 8.0;
+    for f in veg::FORMS {
+        if let Some(&n) = forms.get(&f) {
+            let label = format!("{} {}", f.name(), n);
+            if fx + tw(&label, FS) > aw - 10.0 {
+                break;
+            }
+            txt(&label, fx, 28.0, FS, if f.sprite() { [150, 215, 150] } else { DIM });
+            fx += tw(&label, FS) + 12.0;
+        }
+    }
     if let Some(f) = focus.filter(|&f| f < veg.lineages.len()) {
         let p = &veg.lineages[f];
         let (x, y) = (aw + 14.0, 18.0);
-        txt(&format!("{} #{}", p.form().name(), p.id), x, y, FB, hsv(p.hue, 55.0, 90.0));
+        txt(&format!("{} #{}", p.form().name(), p.id), x, y, FB, hsv(p.g[veg::HUE], 55.0, 90.0));
         let lines = [
-            format!("generation {}", p.generation),
-            format!("parent {}", p.parent.map_or("none".into(), |v| v.to_string())),
+            format!("generation {}   parent {}", p.generation, p.parent.map_or("none".into(), |v| v.to_string())),
             format!("born day {:.2}", p.born as f32 / DAY as f32 + 1.0),
             format!("population {} / peak {}", veg.counts[f], veg.peaks[f]),
         ];
         for (n, l) in lines.iter().enumerate() {
-            txt(l, x, y + 28.0 + n as f32 * 17.0, FS, DIM);
+            txt(l, x, y + 26.0 + n as f32 * 16.0, FS, DIM);
         }
-        for (n, key) in PLANT_TRAITS.iter().enumerate() {
-            let yy = y + 110.0 + n as f32 * 17.0;
-            txt(key, x, yy, FS, DIM);
-            bar(x + 88.0, yy + 2.0, 160.0, p.trait_value(n), [108, 184, 106], 7.0);
+        for (n, (name, k)) in PLANT_TRAITS.iter().enumerate() {
+            let yy = y + 80.0 + n as f32 * 15.0;
+            txt(name, x, yy - 1.0, FS - 1.0, DIM);
+            bar(x + 92.0, yy + 2.0, 170.0, p.g[*k], [108, 184, 106], 6.0);
         }
-        txt("ENTER: jump to a living plant", x, y + 340.0, FS, [120, 220, 160]);
-        if p.form().tall() {
-            let spr = sprites.sprites.entry((p.id, 3)).or_insert_with(|| plant_sprite(p, 3));
-            let k = (240.0 / spr.w as f32).min(200.0 / spr.h as f32).clamp(1.0, 6.0).floor();
-            draw_pixels(&spr.px, spr.w, spr.h, x, y + 362.0, k);
+        let py = y + 80.0 + PLANT_TRAITS.len() as f32 * 15.0 + 4.0;
+        txt("ENTER: jump to a living plant", x, py, FS, [120, 220, 160]);
+        if p.form().sprite() {
+            // deciduous lineages are shown through the seasons
+            let phases: &[u8] = if p.g[veg::DECIDUOUS] >= 0.5 { &[0, 1, 2] } else { &[0] };
+            let avail_h = (shh - py - 40.0).max(40.0);
+            let mut px_ = x;
+            for &ph in phases {
+                let spr = sprites.sprites.entry((p.id, 3, ph)).or_insert_with(|| plant_sprite(p, 3, ph));
+                let slot = 280.0 / phases.len() as f32;
+                let k = ((slot - 8.0) / spr.w as f32).min(avail_h / spr.h as f32).clamp(1.0, 6.0).floor();
+                draw_pixels(&spr.px, spr.w, spr.h, px_, py + 22.0 + avail_h - spr.h as f32 * k, k);
+                px_ += slot;
+            }
         }
     } else {
         txt("Hover or pin a plant lineage.", aw + 14.0, 18.0, FS, DIM);
@@ -1148,7 +1179,14 @@ async fn amain() {
     if let Some(p) = &load_path {
         match read_snapshot(p) {
             Ok(s) => snap = Some(s),
-            Err(e) => load_err = Some(e),
+            Err(e) => {
+                // keep an unreadable autosave instead of overwriting it a minute later
+                if p.exists() {
+                    let backup = p.with_extension("unreadable.evo2");
+                    let _ = std::fs::rename(p, &backup);
+                }
+                load_err = Some(e)
+            }
         }
     }
     let (mut sim, view, si, paused) = match snap {

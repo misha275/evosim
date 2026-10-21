@@ -1,7 +1,7 @@
 //! The ecosystem: terrain, plants, creatures, disease, fire, meteors, quakes, water.
 use crate::genome::*;
 use crate::util::*;
-use crate::vegetation::Vegetation;
+use crate::vegetation::{self as veg, Vegetation};
 use crate::weather::Atmosphere;
 use rand::seq::SliceRandom;
 use rand::{Rng as _, SeedableRng};
@@ -38,6 +38,7 @@ fn prefetch<T>(p: &T) {
 
 #[derive(Clone, Copy)]
 enum PlantAct {
+    Clone(u32, u32),
     Sprout(u32),
     Die(u32),
     Grow(u32, u8),
@@ -75,7 +76,7 @@ pub struct Cr {
     pub tgt: Option<Tgt>,
     pub thr: Option<u32>,
     pub dead: bool,
-    pub gut: VecDeque<(i64, u16)>,
+    pub gut: VecDeque<(i64, u32)>,
     pub wa: f32,
     pub rest: bool,
     pub col: Col,
@@ -169,7 +170,7 @@ pub struct Poop {
     pub x: f32,
     pub y: f32,
     pub ttl: i32,
-    pub seed: Option<u16>,
+    pub seed: Option<u32>,
     pub inf: Option<u32>,
 }
 
@@ -705,7 +706,7 @@ impl Sim {
         None
     }
 
-    pub fn setp(&mut self, i: usize, st: u8, lineage: Option<u16>) {
+    pub fn setp(&mut self, i: usize, st: u8, lineage: Option<u32>) {
         let old = self.pl[i];
         let veg = &mut self.vegetation;
         let prev = veg.ids[i];
@@ -1172,7 +1173,8 @@ impl Sim {
             for j in cand.into_iter().flatten() {
                 let jk = j as u32;
                 if !self.fire.contains_key(&jk) && (self.terr[j] == 0 || self.terr[j] == 3) && !self.ash.contains_key(&jk) {
-                    let p = spread * if self.pl[j] != 0 { 1.0 } else { 0.08 };
+                    // succulent (water-filled) plants barely burn
+                    let p = spread * if self.pl[j] != 0 { 1.0 - 0.7 * self.vegetation.lineage(j).g[veg::SUCCULENCE] } else { 0.08 };
                     if self.rr() < pdt(p, dt) {
                         self.ignite(j, None);
                     }
@@ -1190,7 +1192,20 @@ impl Sim {
             }
             if burnt {
                 let i = k as usize;
-                self.setp(i, 0, None);
+                let (had, id) = (self.pl[i] > 0, self.vegetation.ids[i]);
+                let fr = self.vegetation.lineages[id as usize].g[veg::FIRE_RES];
+                if had && self.rr() < fr {
+                    // fire-adapted: resprouts from the root and the heat opens its seed cones
+                    self.setp(i, 1, Some(id));
+                    for _ in 0..2 {
+                        let j = i as i64 + self.rng.gen_range(-3..=3) + self.w as i64 * self.rng.gen_range(-3..=3);
+                        if j >= 0 && (j as usize) < self.n && self.pl[j as usize] == 0 && self.terr[j as usize] == 0 {
+                            self.sow_lineage(j as usize, id);
+                        }
+                    }
+                } else {
+                    self.setp(i, 0, None);
+                }
                 self.ash.insert(k, 1800);
                 self.fert[i] = (self.fert[i] + 0.08).min(1.0);
             }
@@ -1394,7 +1409,7 @@ impl Sim {
                         if self.terr[j] == 0 {
                             self.fert[j] = (self.fert[j] + 0.05).min(1.0);
                             if self.pl[j] == 0 {
-                                self.setp(j, 1, None);
+                                self.sprout(j);
                             }
                         }
                     }
@@ -1470,7 +1485,7 @@ impl Sim {
     }
 
     // ---- perception (read-only; runs in parallel)
-    fn find_plant(&self, x: f32, y: f32, vis: f32) -> Option<usize> {
+    fn find_plant(&self, x: f32, y: f32, vis: f32, avoid: Option<(f32, f32)>) -> Option<usize> {
         let (cx, cy) = (x as i64 / CH as i64, y as i64 / CH as i64);
         let mut best: Option<usize> = None;
         let mut bd = f32::MAX;
@@ -1497,6 +1512,12 @@ impl Sim {
                                         let dy = yy as f32 - y;
                                         let d = dx * dx + dy * dy;
                                         if d < bd {
+                                            if let Some((tox, thorn)) = avoid {
+                                                let pg = &self.vegetation.lineage(row + xx).g;
+                                                if pg[veg::TOXIN] > tox || pg[veg::THORNS] > thorn {
+                                                    continue;
+                                                }
+                                            }
                                             bd = d;
                                             best = Some(row + xx);
                                         }
@@ -1627,7 +1648,9 @@ impl Sim {
                         }
                     }
                     if tg.is_none() && diet < 0.7 {
-                        if let Some(i) = self.find_plant(x, y, vis) {
+                        // picky unless starving: skip plants too toxic/thorny for this body
+                        let avoid = if hunger < 0.25 { None } else { Some((0.12 + 0.7 * g.v[IMMUNE], 0.12 + 0.7 * g.v[ARMOR])) };
+                        if let Some(i) = self.find_plant(x, y, vis, avoid) {
                             tg = Some(Tgt::Plant(i as u32));
                         }
                     }
@@ -1933,14 +1956,22 @@ impl Sim {
                     let (px, py) = ((o % self.w) as f32 + 0.5, (o / self.w) as f32 + 0.5);
                     if (c.x - px).powi(2) + (c.y - py).powi(2) < reach * reach && self.pl[o] >= 2 {
                         let plant = *self.vegetation.lineage(o);
-                        c.e += (1.0 - 0.6 * plant.defense) * self.pl[o] as f32 * 2.2 * (1.0 - c.g.v[DIET] * 1.4).max(0.05) * (0.6 + 0.8 * c.m34) * glut;
-                        let st = if plant.wood > 0.3 { 1 } else if self.rr() < 0.5 { 0 } else { 1 };
+                        let pg = &plant.g;
+                        c.e += (1.0 - 0.6 * pg[veg::DEFENSE]) * (1.0 - 0.7 * pg[veg::TOXIN]) * self.pl[o] as f32 * 2.2 * (1.0 - c.g.v[DIET] * 1.4).max(0.05) * (0.6 + 0.8 * c.m34) * glut;
+                        // poison hurts unless the immune system copes; thorns hurt unless armored
+                        c.e -= pg[veg::TOXIN] * 10.0 * (1.0 - 0.8 * c.g.v[IMMUNE]);
+                        c.e -= pg[veg::THORNS] * 6.0 * (1.0 - 0.8 * c.g.v[ARMOR]);
+                        // woody, resprouting or clonal plants survive grazing as a stump/root
+                        // defended plants usually lose only a bite and regrow
+                        let tough = pg[veg::WOOD] > 0.3
+                            || self.rr() < 0.5 * pg[veg::CLONAL] + 0.3 * pg[veg::FIRE_RES] + 0.9 * pg[veg::TOXIN] + 0.9 * pg[veg::THORNS] + 0.6 * pg[veg::DEFENSE];
+                        let st = if tough { 1 } else if self.rr() < 0.5 { 0 } else { 1 };
                         self.setp(o, st, None);
                         if self.rr() < 0.85 {
                             let due = (c.gut.back().map_or(0, |l| l.0 + 5)).max(t + self.rng.gen_range(140..=260));
                             // fruiting plants (bloom) are far more likely to have viable seeds carried off
-                            if self.rr() < 0.35 + 0.65 * plant.bloom {
-                                c.gut.push_back((due, plant.id as u16));
+                            if self.rr() < 0.35 + 0.65 * pg[veg::BLOOM] {
+                                c.gut.push_back((due, plant.id));
                             }
                         }
                         c.tgt = None;
@@ -2102,6 +2133,8 @@ impl Sim {
         let _ta = std::time::Instant::now();
         const CHUNK: usize = 2048;
         let seeds: Vec<u64> = (0..samples.len().div_ceil(CHUNK)).map(|_| self.rng.gen()).collect();
+        let winter = (self.t % SEASON) * 4 / SEASON == 3;
+        let drought = if self.wx.kind.dry() { self.wx.int } else { 0.0 };
         let me: &Sim = self;
         let decide = |(ci, chunk): (usize, &[u32])| -> Vec<PlantAct> {
             let mut r = Rng::seed_from_u64(seeds[ci]);
@@ -2128,19 +2161,38 @@ impl Sim {
                 let st = me.pl[i];
                 let terr = me.terr[i];
                 let p = me.vegetation.lineage(i);
+                let pg = &p.g;
                 let temperature = me.tmp[i] as f32 / 255.0 + me.d_t;
                 let suit = Vegetation::suitability_of(p, me.moisture[i], temperature, terr == 1);
-                if suit < 0.1 && r.gen::<f32>() < 1.0 - (0.92 + 0.06 * p.girth).powi(dt) {
+                if suit < 0.1 && r.gen::<f32>() < 1.0 - (0.92 + 0.06 * pg[veg::GIRTH]).powi(dt) {
                     out.push(PlantAct::Die(iu));
                     continue;
                 }
-                let fertility = if terr == 1 { 0.5 } else { me.fert[i] };
+                // natural ageing: soft plants turn over in weeks, wood lives for months
+                if st == 3 && r.gen::<f32>() < pdt(0.06 * (1.0 + 2.0 * pg[veg::ANNUAL]) / (1.0 + 6.0 * pg[veg::WOOD] + 2.0 * pg[veg::GIRTH]), dt) {
+                    out.push(PlantAct::Die(iu));
+                    continue;
+                }
+                // annuals: live fast, die back in winter (their seeds carry on)
+                if winter && pg[veg::ANNUAL] > 0.5 && r.gen::<f32>() < pdt(0.004 * pg[veg::ANNUAL], dt) {
+                    out.push(PlantAct::Die(iu));
+                    continue;
+                }
+                // deciduous plants sleep through the cold season instead of growing
+                let dormant = if winter || temperature < 0.3 { 1.0 - pg[veg::DECIDUOUS] } else { 1.0 };
+                // carnivorous plants catch insects: nutrients even on barren soil
+                let fertility = if terr == 1 { 0.5 } else { me.fert[i].max(0.15 + 0.5 * pg[veg::CARNIVORY]) };
                 let shade = me.atmosphere.shade[me.atmosphere.key((i % w) as f32, (i / w) as f32)];
-                // Growing tall and woody costs resources; height only counts if wood can support it.
-                let rate = fertility * season * suit * (1.0 - 0.4 * shade) / (1.0 + p.wood + 0.3 * p.height + 0.3 * p.bloom + 0.2 * p.girth);
-                // Neighbourhood factor = Janzen-Connell crowding x light competition, in [0.16, 1].
-                // It needs ~10 scattered memory reads, so it is evaluated lazily: only when the random
-                // draw falls in the band where it can change the outcome (exact, just cheaper).
+                // growth is limited by water actually reachable: deep roots and stored water help in dry land
+                let water = if terr == 1 { 1.0 } else { (me.moisture[i] as f32 / 255.0 + 0.25 * pg[veg::ROOTS] + 0.4 * pg[veg::SUCCULENCE]).min(1.0) };
+                if drought > 0.0 && water < 0.35 && r.gen::<f32>() < pdt(0.01 * drought * (1.0 - water / 0.35), dt) {
+                    out.push(PlantAct::Die(iu));
+                    continue;
+                }
+                let rate = fertility * season * suit * dormant * (0.35 + 0.65 * water) * (1.0 - 0.4 * shade) * (1.0 + 0.8 * pg[veg::ANNUAL]) / p.upkeep();
+                // Neighbourhood factor = Janzen-Connell crowding x light competition (x climber support),
+                // in [0.09, 1]. It needs ~14 scattered memory reads, so it is evaluated lazily: only when
+                // the random draw falls in the band where it can change the outcome (exact, just cheaper).
                 let pass = |r: &mut Rng, k: f32| -> bool {
                     let u = r.gen::<f32>();
                     if st < 2 {
@@ -2149,24 +2201,28 @@ impl Sim {
                     if u >= pdt((k * rate).min(1.0), dt) {
                         return false;
                     }
-                    if u < pdt((k * rate * 0.16).min(1.0), dt) {
+                    if u < pdt((k * rate * 0.09).min(1.0), dt) {
                         return true;
                     }
-                    let f = (1.0 - 0.6 * me.vegetation.crowding(i, &me.pl)) * (1.0 - me.vegetation.overshadow(i, &me.pl));
+                    let (shadow, tallest) = me.vegetation.overshadow(i, &me.pl, winter);
+                    let support = if pg[veg::CLIMBING] > 0.5 && tallest < 0.3 { 0.6 } else { 1.0 };
+                    let f = (1.0 - 0.6 * me.vegetation.crowding(i, &me.pl)) * (1.0 - shadow) * support;
                     u < pdt((k * rate * f).min(1.0), dt)
                 };
                 if st < 3 {
                     if pass(&mut r, 0.65) {
                         out.push(PlantAct::Grow(iu, st + 1));
                     }
-                } else if pass(&mut r, 0.35 * seed_crowd) {
-                    let reach = 2.max((3.0 + p.dispersal * 10.0 + p.bloom * 6.0) as i32);
+                } else if pass(&mut r, 0.35 * seed_crowd * (1.0 + 0.6 * pg[veg::ANNUAL])) {
+                    // runners/rhizomes: an identical clone next door; otherwise a seed
+                    let clone = r.gen::<f32>() < 0.7 * pg[veg::CLONAL];
+                    let reach = if clone { 2 } else { 2.max((3.0 + pg[veg::DISPERSAL] * 10.0 + pg[veg::BLOOM] * 6.0) as i32) };
                     let x = (i % w) as i32 + (r.gen::<f32>() * (2 * reach + 1) as f32) as i32 - reach;
                     let y = (i / w) as i32 + (r.gen::<f32>() * (2 * reach + 1) as f32) as i32 - reach;
                     if x >= 0 && x < w as i32 && y >= 0 && y < h as i32 {
                         let j = y as usize * w + x as usize;
                         if me.terr[j] != 2 && me.pl[j] == 0 {
-                            out.push(PlantAct::Seed(iu, j as u32));
+                            out.push(if clone { PlantAct::Clone(iu, j as u32) } else { PlantAct::Seed(iu, j as u32) });
                         }
                     }
                 }
@@ -2181,30 +2237,21 @@ impl Sim {
                 PlantAct::Sprout(i) => {
                     let i = i as usize;
                     if self.pl[i] == 0 {
-                        // seed rain: a sprout usually comes from a nearby plant (inheriting its lineage)
-                        let mut parent = None;
-                        for _ in 0..6 {
-                            let x = (i % w) as i32 + self.rng.gen_range(-3..=3);
-                            let y = (i / w) as i32 + self.rng.gen_range(-3..=3);
-                            if x >= 0 && y >= 0 && (x as usize) < w && (y as usize) < h {
-                                let j = y as usize * w + x as usize;
-                                if self.pl[j] >= 2 && (self.vegetation.lineage(j).aquatic > 0.5) == (self.terr[i] == 1) {
-                                    parent = Some(j);
-                                    break;
-                                }
-                            }
-                        }
-                        match parent {
-                            Some(j) => {
-                                let t = self.t;
-                                let child = self.vegetation.seed(&mut self.rng, j, i, t);
-                                self.setp(i, 1, Some(child));
-                            }
-                            None => self.setp(i, 1, None),
-                        }
+                        self.sprout(i);
                     }
                 }
                 PlantAct::Die(i) => self.setp(i as usize, 0, None),
+                PlantAct::Clone(i, j) => {
+                    let (i, j) = (i as usize, j as usize);
+                    if self.pl[i] == 0 || self.pl[j] != 0 {
+                        continue;
+                    }
+                    let id = self.vegetation.ids[i];
+                    let tj = self.tmp[j] as f32 / 255.0 + self.d_t;
+                    if Vegetation::suitability_of(&self.vegetation.lineages[id as usize], self.moisture[j], tj, self.terr[j] == 1) > 0.2 {
+                        self.setp(j, 1, Some(id));
+                    }
+                }
                 PlantAct::Grow(i, st) => {
                     if self.pl[i as usize] == st - 1 {
                         self.setp(i as usize, st, None);
@@ -2216,12 +2263,17 @@ impl Sim {
                         continue;
                     }
                     let t = self.t;
+                    let annual = self.vegetation.lineage(i).g[veg::ANNUAL];
                     let child = self.vegetation.seed(&mut self.rng, i, j, t);
                     let tj = self.tmp[j] as f32 / 255.0 + self.d_t;
                     if self.vegetation.suitability(j, self.moisture[j], tj, self.terr[j] == 1) > 0.2
                         && self.rr() > 0.7 * self.vegetation.crowding(j, &self.pl)
                     {
                         self.setp(j, 1, Some(child));
+                    }
+                    // annuals spend themselves on seeding
+                    if annual > 0.5 && self.rr() < 0.4 * annual {
+                        self.setp(i, 0, None);
                     }
                 }
             }
@@ -2445,8 +2497,27 @@ let __t4 = std::time::Instant::now();
                 self.hist.pop_front();
             }
         }
+        if self.vegetation.needs_compaction() && self.every(DAY / 4, 0) {
+            self.compact_plant_lineages();
+        }
         if self.lin.len() > 400_000 && self.every(DAY, 0) {
             self.prune_lineage();
+        }
+    }
+
+    fn compact_plant_lineages(&mut self) {
+        let map = self.vegetation.compact(&self.pl);
+        for c in self.crs.iter_mut() {
+            c.gut.retain_mut(|(_, l)| match map.get(l) {
+                Some(&m) => {
+                    *l = m;
+                    true
+                }
+                None => false,
+            });
+        }
+        for p in self.poop.iter_mut() {
+            p.seed = p.seed.and_then(|l| map.get(&l).copied());
         }
     }
 
@@ -2468,8 +2539,36 @@ let __t4 = std::time::Instant::now();
         self.lin.retain(|k, _| keep.contains(k));
     }
 
+    /// Seed rain: a new sprout on empty cell `i` inherits (with mutation) the lineage of a nearby
+    /// plant that suits the site. Only bare regions get the ancestral pioneer lineage.
+    fn sprout(&mut self, i: usize) {
+        let (w, h) = (self.w, self.h);
+        let ti = self.tmp[i] as f32 / 255.0 + self.d_t;
+        let mut seen_any = false;
+        for _ in 0..12 {
+            let x = (i % w) as i32 + self.rng.gen_range(-4..=4);
+            let y = (i / w) as i32 + self.rng.gen_range(-4..=4);
+            if x < 0 || y < 0 || x as usize >= w || y as usize >= h {
+                continue;
+            }
+            let j = y as usize * w + x as usize;
+            if self.pl[j] >= 2 {
+                seen_any = true;
+                if Vegetation::suitability_of(self.vegetation.lineage(j), self.moisture[i], ti, self.terr[i] == 1) > 0.15 {
+                    let t = self.t;
+                    let child = self.vegetation.seed(&mut self.rng, j, i, t);
+                    self.setp(i, 1, Some(child));
+                    return;
+                }
+            }
+        }
+        if !seen_any || self.rr() < 0.1 {
+            self.setp(i, 1, None);
+        }
+    }
+
     /// A dispersed seed of `lin` lands on empty cell `i`: mutate like any seed, establish if suitable.
-    fn sow_lineage(&mut self, i: usize, lin: u16) {
+    fn sow_lineage(&mut self, i: usize, lin: u32) {
         if (lin as usize) >= self.vegetation.lineages.len() {
             return;
         }

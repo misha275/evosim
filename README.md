@@ -58,22 +58,48 @@ small map 1 884 → 99 000. A desktop CPU with more cores is faster still.
 
 ## Plants
 
-Plant seeds inherit height, woodiness, climate preferences, dispersal, defenses and tree architecture — crown shape,
-weeping branches, foliage density, branching, trunk girth and flowers/fruit with their own colour. Trees are drawn from those genes.
+Every plant seed inherits 25 genes and mutates (usually one or two genes at a time). Plant form follows from the genes,
+and each gene has a real cost and benefit in the ecosystem:
+
+| gene | what it does |
+|---|---|
+| height, wood, girth | tall plants shade shorter neighbours, but height only counts if wood can hold it up; wood survives grazing and lives long |
+| moisture, temperature, aquatic | climate and water niche (aquatic plants live in water, reeds on both sides of the shore) |
+| roots | reach deeper water: grow in dry land |
+| succulence | stores water: survives drought and heat waves, barely burns → **cactus** |
+| deciduous | sleeps through winter instead of freezing; autumn colours, bare in winter, lets light through in winter |
+| toxin | herbivores lose energy eating it and learn to avoid it (unless their immune system copes) |
+| thorns | hurts herbivores (unless armored); they avoid it |
+| defense | less nutritious, often survives a bite |
+| fire resist | thick bark: resprouts after fire and the heat releases its seeds |
+| climbing | not shaded by what it climbs on, but needs tall neighbours → **vine** |
+| runners | spreads clones next to itself (rhizomes), survives grazing |
+| annual | grows and seeds fast, dies after seeding and in winter |
+| carnivory | catches insects: grows on barren soil → **flytrap** |
+| bloom, dispersal | flowers/fruit: animals carry the seeds and drop them in dung far away → **flower** |
+| crown, droop, density, branching, hues | the look of the crown: round, conical (**conifer**), umbrella (**palm**), weeping |
+
+Forms: tree, conifer, palm, shrub, cactus, vine, flytrap, flower, reed, kelp, algae, grass, moss, biofilm.
+The plant phylogeny (`T`, then `Tab` to Plants) shows a census of living forms, every gene of a lineage, and its sprite
+(deciduous ones through the seasons).
 
 Selection on plants:
-- **Light**: taller neighbours shade shorter plants. Height only counts if the wood can hold it up, so trees emerge as height
-  and wood co-evolve. Growing tall and woody costs growth.
+- **Light**: taller neighbours shade shorter plants; climbers escape shade.
 - **Janzen–Connell effect**: dense stands of one lineage suffer from specialist pests, so rare variants establish more easily.
-- **Seed rain**: new sprouts usually inherit a nearby plant's lineage; animals carry seeds of the plants they ate and drop them
-  in dung (fruiting plants are dispersed much more often).
-- Turnover continues up to ~1.5x the carrying capacity, so evolution does not freeze when the land is full.
+- **Herbivores**: they choose palatable plants, so toxins and thorns pay off; animals evolve immunity/armor in return.
+- **Seed rain**: sprouts inherit a nearby plant's lineage; animals carry seeds of what they ate.
+- **Turnover**: soft plants live weeks, woody ones months, annuals die after seeding; turnover keeps evolution going.
+- Lineage records are compacted on very long runs (forgotten extinct twigs are dropped, living ancestry is kept).
+
+Forests, conifers, palms and cacti need time: run a world for ~1 million ticks (a few minutes at x1000).
+`cargo run --release --example gallery` renders all forms to `plant_gallery.png`.
 
 ## Controls
 
 - `Space` pause · `R` restart · `N` next map size · `S` screenshot
 - `F5` quicksave · `F9` load quicksave (or autosave). Autosave every 60 s and on exit to `saves/autosave.evo2`.
-  Saves are written in the background and atomically. Old Python `.evo` saves cannot be loaded by the Rust version.
+  Saves are written in the background and atomically. Saves from older versions cannot be loaded (an unreadable
+  autosave is kept as `autosave.unreadable.evo2` instead of being overwritten).
 - Left click inspect · drag pan · wheel or `+`/`-` zoom · arrows pan · `0` fit map
 - Right click: seeds · `H`/`C`: herbivore/carnivore founders (animal sandbox)
 - `T` or click the panel tree: fullscreen phylogeny; `Tab` switches all creatures / microbial / animals / plants;

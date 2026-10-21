@@ -24,6 +24,10 @@ fn main() {
     let el = t0.elapsed().as_secs_f32();
     println!("time: weather {:.2}s plants {:.2}s corpses {:.2}s creatures {:.2}s", s.prof[0], s.prof[1], s.prof[2], s.prof[4]);
         let mut forms = std::collections::BTreeMap::new(); for i in 0..s.n { if s.pl[i] > 0 { *forms.entry(s.vegetation.lineage(i).form().name()).or_insert(0) += 1; } }
+    let mut tall = std::collections::BTreeMap::new(); for (i,l) in s.vegetation.lineages.iter().enumerate() { if s.vegetation.counts[i]>0 { *tall.entry(l.form().name()).or_insert(0u32) += s.vegetation.counts[i]; } }
+    println!("living forms {:?}", tall);
+    { let v=&s.vegetation; let mut hist=[0u32;30]; for (i,l) in v.lineages.iter().enumerate() { hist[(l.generation as usize).min(29)] += v.counts[i]; } println!("base0 {} base1 {} gen-hist {:?} compactions epoch {} created {}", v.counts[0], v.counts[1], &hist[..20], v.epoch, v.total_created); }
+    { let v=&s.vegetation; let mut tot=0f64; let mut acc=[0f64; evosim::vegetation::NPG]; let mut mg=0; for (i,l) in v.lineages.iter().enumerate() { let c=v.counts[i] as f64; if c>0.0 { mg=mg.max(l.generation); tot+=c; for k in 0..evosim::vegetation::NPG { acc[k]+=c*l.g[k] as f64; } } } let names: Vec<String> = evosim::vegetation::TRAITS.iter().map(|(n,k)| format!("{}={:.2}", n, acc[*k]/tot.max(1.0))).collect(); println!("max gen {} mean genes {}", mg, names.join(" ")); }
     println!("forms {:?} land {} cap {} crowd {:.3} poop {}", forms, s.land, s.land as f32*0.1, s.crowd, s.poop.len());
     println!("DONE t {} in {:.2}s = {:.0} ticks/s | pop {} plants {} species {} trees {} lineages {}", s.t, el, s.t as f32/el, s.crs.len(), s.nplants, s.alive_species(), s.vegetation.trees.len(), s.vegetation.lineages.len());
 }
