@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-const MAGIC: &[u8] = b"EVOSIM-RS\x03\n";
+const MAGIC: &[u8] = b"EVOSIM-RS\x04\n";
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 pub struct View {
@@ -64,7 +64,7 @@ pub fn read_snapshot(path: &Path) -> Result<Snapshot, String> {
     f.read_exact(&mut magic).map_err(|e| e.to_string())?;
     if magic != MAGIC {
         if magic.starts_with(b"EVOSIM-RS") {
-            return Err("save from an older EVOSIM version (plant genes changed)".into());
+            return Err("save from an older EVOSIM version (world format changed)".into());
         }
         return Err("not an EVOSIM (Rust) save".into());
     }
@@ -75,7 +75,7 @@ pub fn read_snapshot(path: &Path) -> Result<Snapshot, String> {
     if !(120..=4096).contains(&s.w) || !(120..=4096).contains(&s.h) || s.n != s.w * s.h {
         return Err("invalid saved world dimensions".into());
     }
-    if s.terr.len() != s.n || s.pl.len() != s.n || s.bg.len() != s.n || s.vegetation.ids.len() != s.n {
+    if s.terr.len() != s.n || s.biome.len() != s.n || s.pl.len() != s.n || s.bg.len() != s.n || s.vegetation.ids.len() != s.n {
         return Err("incomplete saved world".into());
     }
     if s.atmosphere.width != s.w || s.atmosphere.height != s.h {

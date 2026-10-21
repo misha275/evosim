@@ -21,10 +21,16 @@ const KREST: f32 = 0.14;
 const KMOVE: f32 = 0.12;
 const SPEC_T: f32 = 0.26;
 
-pub const WORLDS: [(&str, usize, usize); 7] = [
+pub const WORLDS: [(&str, usize, usize); 9] = [
     ("small", 340, 230), ("medium", 480, 320), ("large", 640, 420), ("huge", 960, 640), ("vast", 1280, 840),
-    ("giant", 1600, 1060), ("colossal", 2048, 1360),
+    ("giant", 1600, 1060), ("colossal", 2048, 1360), ("titan", 3072, 2048), ("planet", 4096, 2730),
 ];
+
+/// Seasonal swing multiplier by row: strong seasons in the cold north, mild near the hot south.
+#[inline]
+pub fn season_amp(y: usize, h: usize) -> f32 {
+    1.6 - 1.2 * (y as f32 / h as f32)
+}
 
 #[inline(always)]
 fn prefetch<T>(p: &T) {
@@ -274,6 +280,7 @@ pub struct Lin {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Sim {
     pub primordial: bool,
+    pub map_type: crate::worldgen::MapType,
     pub w: usize,
     pub h: usize,
     pub n: usize,
@@ -291,6 +298,10 @@ pub struct Sim {
     pub dark: f32,
     pub d_t: f32,
     pub crowd: f32,
+    /// crowding of aquatic plants (separate carrying capacity for water)
+    pub crowd_w: f32,
+    /// plants growing in water cells
+    pub nwater_plants: i64,
     pub crs: Vec<Cr>,
     pub cor: Vec<Co>,
     pub bones: Vec<Bo>,
@@ -324,6 +335,8 @@ pub struct Sim {
     pub elevation: Vec<u8>,
     pub moisture: Vec<u8>,
     pub springs: Vec<u32>,
+    /// biome per cell (worldgen::Biome)
+    pub biome: Vec<u8>,
     pub pools: FxHashMap<u32, f32>,
     pub terr: Vec<u8>,
     pub fert: Vec<f32>,
@@ -368,9 +381,14 @@ fn susc(o: &mut Cr, st: &Strain, t: i64) -> f32 {
 
 impl Sim {
     pub fn new(w: usize, h: usize, primordial: bool, seed: u64) -> Sim {
+        Self::new_with(w, h, primordial, seed, crate::worldgen::MapType::Continents)
+    }
+
+    pub fn new_with(w: usize, h: usize, primordial: bool, seed: u64, map_type: crate::worldgen::MapType) -> Sim {
         let n = w * h;
         let mut s = Sim {
             primordial,
+            map_type,
             w,
             h,
             n,
@@ -379,7 +397,7 @@ impl Sim {
             gwc: w.div_ceil(CG),
             ghc: h.div_ceil(CG),
             ps: 300.max(n / 110),
-            maxpop: 120.max((800f32.min(300.0 * n as f32 / 78200.0)) as usize),
+            maxpop: 120.max((2000f32.min(300.0 * n as f32 / 78200.0)) as usize),
             rng: Rng::seed_from_u64(seed),
             dt: 1,
             t: 0,
@@ -388,6 +406,8 @@ impl Sim {
             dark: 0.0,
             d_t: 0.0,
             crowd: 1.0,
+            crowd_w: 1.0,
+            nwater_plants: 0,
             crs: Vec::new(),
             cor: Vec::new(),
             bones: Vec::new(),
@@ -419,6 +439,7 @@ impl Sim {
             elevation: vec![],
             moisture: vec![],
             springs: vec![],
+            biome: vec![],
             pools: FxHashMap::default(),
             terr: vec![0; n],
             fert: vec![0.0; n],
@@ -443,17 +464,37 @@ impl Sim {
         s.kgrid = vec![Vec::new(); s.gwc * s.ghc];
         s.next_outbreak = s.rng.gen_range(DAY / 2..=DAY);
         s.mkworld();
-        let area = n as f32 / 78200.0;
+        // animal numbers scale with the land, not the whole map (oceans feed no land animals)
+        let area = (s.land as f32 / 58000.0).max(0.3);
+        s.maxpop = 120.max((1200f32.min(300.0 * s.land as f32 / 58000.0)) as usize);
         let founders: &[(Kind, usize)] =
-            if primordial { &[(Kind::Microbe, 90)] } else { &[(Kind::Herb, 70), (Kind::Omni, 14), (Kind::Carn, 6)] };
+            if primordial { &[(Kind::Microbe, 90)] } else { &[(Kind::Herb, 70), (Kind::Omni, 6), (Kind::Carn, 3)] };
         for &(kind, cnt) in founders {
             let b = base_genome(&mut s.rng, kind);
             let sp = s.newsp(None, b.clone(), "");
-            for _ in 0..cnt.max((cnt as f32 * area.powf(0.8)) as usize) {
+            // founders arrive in herds/colonies: a suitable spot, then companions around it
+            let total = cnt.max((cnt as f32 * area.powf(0.8)) as usize);
+            let mut herd_at: Option<(f32, f32)> = None;
+            for k in 0..total {
                 let h1 = mutate(&mut s.rng, &b, 0.8).0;
                 let h2 = mutate(&mut s.rng, &b, 0.8).0;
-                let pos = s.near_prey(kind);
-                s.spawn(h1, h2, sp, None, pos, None, "founder", None, None);
+                if k % 12 == 0 {
+                    herd_at = None;
+                }
+                let pos = match herd_at {
+                    Some((hx, hy)) => {
+                        let (x, y) = (hx + s.rng.gen_range(-8.0..8.0), hy + s.rng.gen_range(-8.0..8.0));
+                        let swim = aquatic(&b);
+                        let okp = if swim { x >= 1.0 && y >= 1.0 && x < (w - 1) as f32 && y < (h - 1) as f32 && s.terr[y as usize * w + x as usize] == 1 } else { s.ok(x, y, false) };
+                        if okp { Some((x, y)) } else { None }
+                    }
+                    None => s.near_prey(kind),
+                };
+                if let Some(ci) = s.spawn(h1, h2, sp, None, pos, None, "founder", None, None) {
+                    if herd_at.is_none() {
+                        herd_at = Some((s.crs[ci].x, s.crs[ci].y));
+                    }
+                }
             }
         }
         s
@@ -463,6 +504,7 @@ impl Sim {
     pub fn rebuild_after_load(&mut self) {
         self.pcount = vec![0; self.cwc * self.chc];
         self.occ = vec![0; self.n.div_ceil(64)];
+        self.nwater_plants = (0..self.n).filter(|&i| self.pl[i] > 0 && self.terr[i] == 1).count() as i64;
         for i in 0..self.n {
             if self.pl[i] > 0 {
                 self.occ[i >> 6] |= 1 << (i & 63);
@@ -504,69 +546,30 @@ impl Sim {
 
     // ------------------------------------------------------------ world generation
     fn mkworld(&mut self) {
-        let (w, h, n) = (self.w, self.h, self.n);
-        let sf = (w as f32 / 340.0).powf(0.7);
-        let sc = |v: &[f32]| -> Vec<usize> { v.iter().map(|&x| 3.max((x * sf) as usize)).collect() };
-        let el = fbm(&mut self.rng, w, h, &sc(&[48.0, 24.0, 12.0, 6.0]), &[0.5, 0.3, 0.15, 0.05]);
-        let mo = fbm(&mut self.rng, w, h, &sc(&[40.0, 20.0, 8.0]), &[0.55, 0.3, 0.15]);
-        let tn = fbm(&mut self.rng, w, h, &sc(&[60.0, 25.0]), &[0.65, 0.35]);
-        self.elevation = el.iter().map(|&v| (v.clamp(0.0, 1.0) * 255.0) as u8).collect();
-        self.moisture = mo.iter().map(|&v| (v.clamp(0.0, 1.0) * 255.0) as u8).collect();
-        for y in 0..h {
-            let lat = y as f32 / h as f32;
-            for x in 0..w {
-                let i = y * w + x;
-                let (e, m) = (el[i], mo[i]);
-                let nz: i32 = self.rng.gen_range(-5..=5);
-                let t = (0.12 + 0.74 * lat - 0.3 * (e - 0.45).max(0.0) + (tn[i] - 0.5) * 0.2).clamp(0.02, 1.0);
-                self.tmp[i] = (t * 255.0) as u8;
-                let suit = (1.15 - 2.2 * (t - 0.55).abs()).clamp(0.05, 1.0);
-                let col: [i32; 3];
-                if e < 0.38 {
-                    let tt = e / 0.38;
-                    self.terr[i] = 1;
-                    let mut c = [(24.0 + 20.0 * tt) as u8, (70.0 + 60.0 * tt) as u8, (130.0 + 60.0 * tt) as u8];
-                    if t < 0.14 {
-                        c = mix(c, [200, 225, 240], 0.75);
-                    }
-                    col = [c[0] as i32, c[1] as i32, c[2] as i32];
-                } else if e > 0.8 {
-                    self.terr[i] = 2;
-                    col = [104 + nz * 2, 104 + nz * 2, 116 + nz * 2];
-                } else if e < 0.42 {
-                    self.terr[i] = 3;
-                    self.fert[i] = 0.12 * suit;
-                    col = [196 + nz, 182 + nz, 130 + nz];
-                    self.land += 1;
-                } else {
-                    let f = (m * 1.7 - 0.35).clamp(0.05, 1.0);
-                    self.fert[i] = f * suit;
-                    self.land += 1;
-                    let base = [
-                        ((128.0 - 82.0 * f) as i32 + nz).clamp(0, 255) as u8,
-                        ((108.0 - 30.0 * f) as i32 + nz).clamp(0, 255) as u8,
-                        ((72.0 - 16.0 * f) as i32 + nz).clamp(0, 255) as u8,
-                    ];
-                    let mut c = base;
-                    if t < 0.3 {
-                        c = mix(c, [226, 234, 244], ((0.3 - t) / 0.18).min(1.0) * 0.85);
-                    } else if t > 0.78 {
-                        c = mix(c, [206, 170, 100], ((t - 0.78) / 0.15).min(1.0) * 0.7);
-                    }
-                    col = [c[0] as i32, c[1] as i32, c[2] as i32];
-                }
-                self.bg[i] = [col[0].clamp(0, 255) as u8, col[1].clamp(0, 255) as u8, col[2].clamp(0, 255) as u8];
-            }
-        }
-        self.form_sources();
-        for _ in 0..(self.land as f32 * 0.04) as usize {
-            let i = self.rng.gen_range(0..n);
-            if self.terr[i] == 0 && self.fert[i] > 0.2 {
+        let wd = crate::worldgen::generate(self.w, self.h, self.map_type, &mut self.rng);
+        self.terr = wd.terr;
+        self.elevation = wd.elevation;
+        self.moisture = wd.moisture;
+        self.tmp = wd.tmp;
+        self.fert = wd.fert;
+        self.bg = wd.bg;
+        self.biome = wd.biome;
+        self.springs = wd.springs;
+        self.land = wd.land;
+        // initial vegetation near carrying capacity, denser on fertile soil
+        for i in 0..self.n {
+            if self.terr[i] == 0 && self.rng.gen::<f32>() < 0.16 * self.fert[i] {
                 self.setp(i, 3, None);
-            } else if self.terr[i] == 1 {
+            } else if self.terr[i] == 1 && self.elevation[i] > 70 && self.rng.gen::<f32>() < 0.03 {
                 self.setp(i, 3, Some(0));
             }
         }
+    }
+
+    /// Local temperature without weather shading: climate + season (seasons are stronger in the cold north).
+    #[inline]
+    pub fn temp_at(&self, i: usize) -> f32 {
+        self.tmp[i] as f32 / 255.0 + self.d_t * season_amp(i / self.w, self.h)
     }
 
     #[inline]
@@ -594,36 +597,6 @@ impl Sim {
             self.bg_version += 1;
             if temporary {
                 self.pools.insert(i as u32, 900.0);
-            }
-        }
-    }
-
-    fn form_sources(&mut self) {
-        for _ in 0..3.max(self.n / 50000) {
-            let cands: Vec<usize> = (0..120)
-                .map(|_| self.rng.gen_range(0..self.n))
-                .filter(|&i| self.terr[i] == 0 && self.moisture[i] > 110)
-                .collect();
-            let Some(&start) = cands.iter().max_by_key(|&&j| self.elevation[j]) else { continue };
-            let mut i = start;
-            self.springs.push(i as u32);
-            let mut seen = FxHashSet::default();
-            for _ in 0..250 {
-                if !seen.insert(i) {
-                    break;
-                }
-                let was_water = self.terr[i] == 1;
-                self.make_water(i, false);
-                if was_water {
-                    break;
-                }
-                let ns: Vec<usize> = self.neighbors(i).filter(|j| !seen.contains(j) && self.terr[*j] != 2).collect();
-                let Some(&j) = ns.iter().min_by_key(|&&j| self.elevation[j]) else { break };
-                if self.elevation[j] as i32 > self.elevation[i] as i32 + 2 {
-                    break;
-                }
-                self.elevation[i] = self.elevation[i].saturating_sub(1);
-                i = j;
             }
         }
     }
@@ -663,6 +636,9 @@ impl Sim {
             *p = p.min(1800.0);
             if *p <= 0.0 {
                 self.pools.remove(&k);
+                if self.pl[i] > 0 {
+                    self.nwater_plants -= 1;
+                }
                 self.terr[i] = 0;
                 self.land += 1;
                 self.fert[i] = self.fert[i].max(0.35);
@@ -673,7 +649,7 @@ impl Sim {
         for ci in 0..self.crs.len() {
             let (x, y) = (self.crs[ci].x, self.crs[ci].y);
             let i = y as usize * self.w + x as usize;
-            if self.terr[i] != 1 || can_swim(&self.crs[ci].g) || self.crs[ci].z > 0.0 {
+            if self.terr[i] != 1 || can_swim(&self.crs[ci].g) || self.crs[ci].z > 0.0 || self.biome.get(i) == Some(&(crate::worldgen::Biome::River as u8)) {
                 continue;
             }
             let shores: Vec<usize> = self.neighbors(i).filter(|&j| self.terr[j] == 0 || self.terr[j] == 3).collect();
@@ -697,8 +673,9 @@ impl Sim {
         }
         for _ in 0..30 {
             let (hx, hy) = herb[self.rng.gen_range(0..herb.len())];
-            let x = hx + self.rng.gen_range(-14.0..14.0);
-            let y = hy + self.rng.gen_range(-14.0..14.0);
+            // close enough to find prey, far enough not to wipe a herd out on day one
+            let x = hx + self.rng.gen_range(-60.0..60.0);
+            let y = hy + self.rng.gen_range(-60.0..60.0);
             if self.ok(x, y, false) {
                 return Some((x, y));
             }
@@ -713,7 +690,7 @@ impl Sim {
         if let Some(l) = lineage {
             veg.ids[i] = l;
         } else if old == 0 && st != 0 {
-            veg.ids[i] = if self.terr[i] == 1 { 0 } else { 1 };
+            veg.ids[i] = if self.terr[i] == 1 { 0 } else { veg.pioneer(self.tmp[i] as f32 / 255.0, self.moisture[i] as f32 / 255.0) };
         }
         let cur = veg.ids[i];
         if old != 0 && (st == 0 || prev != cur) {
@@ -748,7 +725,11 @@ impl Sim {
         } else if old >= 2 && st < 2 {
             self.pcount[k] -= 1;
         }
-        self.nplants += (st > 0) as i64 - (old > 0) as i64;
+        let d = (st > 0) as i64 - (old > 0) as i64;
+        self.nplants += d;
+        if self.terr[i] == 1 {
+            self.nwater_plants += d;
+        }
     }
 
     pub fn newsp(&mut self, parent: Option<u32>, g: Genome, note: &str) -> u32 {
@@ -782,9 +763,9 @@ impl Sim {
             None => {
                 let mut i: Option<usize> = None;
                 let aq = aquatic(&g);
-                for _ in 0..80 {
+                for _ in 0..400 {
                     let j = self.rng.gen_range(0..self.n);
-                    let okk = if aq { self.terr[j] == 1 } else { self.terr[j] == 0 || self.terr[j] == 3 };
+                    let okk = if aq { self.terr[j] == 1 } else { self.terr[j] == 0 && self.fert[j] > 0.3 };
                     if okk {
                         i = Some(j);
                         if (self.tmp[j] as f32 / 255.0 - g.v[TOL]).abs() < 0.14 {
@@ -1485,7 +1466,7 @@ impl Sim {
     }
 
     // ---- perception (read-only; runs in parallel)
-    fn find_plant(&self, x: f32, y: f32, vis: f32, avoid: Option<(f32, f32)>) -> Option<usize> {
+    fn find_plant(&self, x: f32, y: f32, vis: f32, avoid: Option<(f32, f32)>, swim: bool) -> Option<usize> {
         let (cx, cy) = (x as i64 / CH as i64, y as i64 / CH as i64);
         let mut best: Option<usize> = None;
         let mut bd = f32::MAX;
@@ -1507,7 +1488,7 @@ impl Sim {
                             for yy in y0..(y0 + CH).min(self.h) {
                                 let row = yy * self.w;
                                 for xx in x0..(x0 + CH).min(self.w) {
-                                    if self.pl[row + xx] >= 2 {
+                                    if self.pl[row + xx] >= 2 && (swim || self.terr[row + xx] != 1) {
                                         let dx = xx as f32 - x;
                                         let dy = yy as f32 - y;
                                         let d = dx * dx + dy * dy;
@@ -1650,7 +1631,7 @@ impl Sim {
                     if tg.is_none() && diet < 0.7 {
                         // picky unless starving: skip plants too toxic/thorny for this body
                         let avoid = if hunger < 0.25 { None } else { Some((0.12 + 0.7 * g.v[IMMUNE], 0.12 + 0.7 * g.v[ARMOR])) };
-                        if let Some(i) = self.find_plant(x, y, vis, avoid) {
+                        if let Some(i) = self.find_plant(x, y, vis, avoid, can_swim(g) || c.z > 0.5) {
                             tg = Some(Tgt::Plant(i as u32));
                         }
                     }
@@ -1684,8 +1665,10 @@ impl Sim {
         if x < 1.0 || y < 1.0 || x >= (self.w - 1) as f32 || y >= (self.h - 1) as f32 {
             return false;
         }
-        let t = self.terr[y as usize * self.w + x as usize];
-        t == 0 || t == 3 || (sw && t == 1)
+        let i = y as usize * self.w + x as usize;
+        let t = self.terr[i];
+        // rivers can be waded across; lakes and the sea need swimmers
+        t == 0 || t == 3 || (t == 1 && (sw || self.biome.get(i) == Some(&(crate::worldgen::Biome::River as u8))))
     }
 
     fn target_pos(&self, tg: Tgt) -> Option<(f32, f32)> {
@@ -1701,6 +1684,43 @@ impl Sim {
             Tgt::Prey(id) | Tgt::Mate(id) => self.idmap.get(&id).map(|&j| &self.crs[j]).filter(|o| !o.dead).map(|o| (o.x, o.y)),
             Tgt::Corpse(id) | Tgt::Bury(id) => self.kmap.get(&id).map(|&j| &self.cor[j]).filter(|k| !k.dead).map(|k| (k.x, k.y)),
         }
+    }
+
+    /// One bite of a plant: energy, poison/thorn damage, the plant's fate and seeds in the gut.
+    fn graze(&mut self, c: &mut Cr, o: usize, glut: f32) {
+        let t = self.t;
+        let plant = *self.vegetation.lineage(o);
+        let pg = &plant.g;
+        c.e += (1.0 - 0.6 * pg[veg::DEFENSE]) * (1.0 - 0.7 * pg[veg::TOXIN]) * self.pl[o] as f32 * 2.2 * (1.0 - c.g.v[DIET] * 1.4).max(0.05) * (0.6 + 0.8 * c.m34) * glut;
+        // poison hurts unless the immune system copes; thorns hurt unless armored
+        c.e -= pg[veg::TOXIN] * 10.0 * (1.0 - 0.8 * c.g.v[IMMUNE]);
+        c.e -= pg[veg::THORNS] * 6.0 * (1.0 - 0.8 * c.g.v[ARMOR]);
+        // woody, resprouting, clonal or defended plants usually lose only a bite and regrow
+        let tough = pg[veg::WOOD] > 0.3
+            || self.rr() < 0.5 * pg[veg::CLONAL] + 0.3 * pg[veg::FIRE_RES] + 0.9 * pg[veg::TOXIN] + 0.9 * pg[veg::THORNS] + 0.6 * pg[veg::DEFENSE];
+        let st = if tough { 1 } else if self.rr() < 0.5 { 0 } else { 1 };
+        self.setp(o, st, None);
+        if self.rr() < 0.85 {
+            let due = (c.gut.back().map_or(0, |l| l.0 + 5)).max(t + self.rng.gen_range(140..=260));
+            // fruiting plants (bloom) are far more likely to have viable seeds carried off
+            if self.rr() < 0.35 + 0.65 * pg[veg::BLOOM] {
+                c.gut.push_back((due, plant.id));
+            }
+        }
+    }
+
+    fn grown_plant_near(&self, x: f32, y: f32, reach: f32) -> Option<usize> {
+        let r = reach.ceil() as i64;
+        let (cx, cy) = (x as i64, y as i64);
+        for yy in (cy - r).max(0)..=(cy + r).min(self.h as i64 - 1) {
+            for xx in (cx - r).max(0)..=(cx + r).min(self.w as i64 - 1) {
+                let i = yy as usize * self.w + xx as usize;
+                if self.pl[i] >= 2 && (xx as f32 + 0.5 - x).powi(2) + (yy as f32 + 0.5 - y).powi(2) < reach * reach {
+                    return Some(i);
+                }
+            }
+        }
+        None
     }
 
     fn live(&mut self, ci: usize, look: Option<(Option<u32>, Option<Tgt>)>) {
@@ -1955,24 +1975,18 @@ impl Sim {
                     let o = o as usize;
                     let (px, py) = ((o % self.w) as f32 + 0.5, (o / self.w) as f32 + 0.5);
                     if (c.x - px).powi(2) + (c.y - py).powi(2) < reach * reach && self.pl[o] >= 2 {
-                        let plant = *self.vegetation.lineage(o);
-                        let pg = &plant.g;
-                        c.e += (1.0 - 0.6 * pg[veg::DEFENSE]) * (1.0 - 0.7 * pg[veg::TOXIN]) * self.pl[o] as f32 * 2.2 * (1.0 - c.g.v[DIET] * 1.4).max(0.05) * (0.6 + 0.8 * c.m34) * glut;
-                        // poison hurts unless the immune system copes; thorns hurt unless armored
-                        c.e -= pg[veg::TOXIN] * 10.0 * (1.0 - 0.8 * c.g.v[IMMUNE]);
-                        c.e -= pg[veg::THORNS] * 6.0 * (1.0 - 0.8 * c.g.v[ARMOR]);
-                        // woody, resprouting or clonal plants survive grazing as a stump/root
-                        // defended plants usually lose only a bite and regrow
-                        let tough = pg[veg::WOOD] > 0.3
-                            || self.rr() < 0.5 * pg[veg::CLONAL] + 0.3 * pg[veg::FIRE_RES] + 0.9 * pg[veg::TOXIN] + 0.9 * pg[veg::THORNS] + 0.6 * pg[veg::DEFENSE];
-                        let st = if tough { 1 } else if self.rr() < 0.5 { 0 } else { 1 };
-                        self.setp(o, st, None);
-                        if self.rr() < 0.85 {
-                            let due = (c.gut.back().map_or(0, |l| l.0 + 5)).max(t + self.rng.gen_range(140..=260));
-                            // fruiting plants (bloom) are far more likely to have viable seeds carried off
-                            if self.rr() < 0.35 + 0.65 * pg[veg::BLOOM] {
-                                c.gut.push_back((due, plant.id));
+                        // A coarse step (dt>1) stands for several ticks of grazing: keep eating
+                        // neighbouring plants, as the animal would have done tick by tick.
+                        let bites = 1 + (dt - 1) / 3;
+                        let mut cell = Some(o);
+                        let mut n = 0;
+                        while let Some(o) = cell {
+                            self.graze(c, o, glut);
+                            n += 1;
+                            if n >= bites || c.e >= c.max_e {
+                                break;
                             }
+                            cell = self.grown_plant_near(c.x, c.y, reach);
                         }
                         c.tgt = None;
                     }
@@ -2113,10 +2127,16 @@ impl Sim {
     // ---- plants
     fn grow_plants(&mut self) {
         let season = (1.0 + 0.55 * (2.0 * std::f32::consts::PI * (self.t % SEASON) as f32 / SEASON as f32).sin()) * self.wx_grow * (1.0 - 0.6 * self.dust);
-        self.crowd = (1.0 - self.nplants as f32 / (self.land as f32 * 0.1).max(1.0)).max(0.0);
+        // land and water have separate carrying capacities (algae must not crowd out land plants)
+        let land_plants = (self.nplants - self.nwater_plants).max(0) as f32;
+        let water_cells = (self.n as i64 - self.land).max(1) as f32;
+        self.crowd = (1.0 - land_plants / (self.land as f32 * 0.13).max(1.0)).max(0.0);
+        self.crowd_w = (1.0 - self.nwater_plants as f32 / (water_cells * 0.06)).max(0.0);
         let crowd = self.crowd;
+        let crowd_w = self.crowd_w;
         // seeds keep replacing dead plants up to ~1.5x the carrying capacity (turnover drives evolution)
-        let seed_crowd = crowd.max((1.0 - self.nplants as f32 / (self.land as f32 * 0.15).max(1.0)).max(0.0) * 0.5);
+        let seed_crowd = crowd.max((1.0 - land_plants / (self.land as f32 * 0.19).max(1.0)).max(0.0) * 0.5);
+        let seed_crowd_w = crowd_w.max((1.0 - self.nwater_plants as f32 / (water_cells * 0.09)).max(0.0) * 0.5);
         let dt = self.dt;
         let (w, h, n) = (self.w, self.h, self.n);
         let sprout = pdt((0.0008 * season).min(1.0), dt);
@@ -2153,7 +2173,8 @@ impl Sim {
                     }
                 }
                 if me.occ[i >> 6] & (1 << (i & 63)) == 0 {
-                    if crowd > 0.0 && r.gen::<f32>() < sprout && (me.terr[i] == 0 || me.terr[i] == 1) {
+                    let cr = if me.terr[i] == 1 { crowd_w } else { crowd };
+                    if cr > 0.0 && r.gen::<f32>() < sprout && (me.terr[i] == 0 || me.terr[i] == 1) {
                         out.push(PlantAct::Sprout(iu));
                     }
                     continue;
@@ -2162,14 +2183,14 @@ impl Sim {
                 let terr = me.terr[i];
                 let p = me.vegetation.lineage(i);
                 let pg = &p.g;
-                let temperature = me.tmp[i] as f32 / 255.0 + me.d_t;
+                let temperature = me.temp_at(i);
                 let suit = Vegetation::suitability_of(p, me.moisture[i], temperature, terr == 1);
                 if suit < 0.1 && r.gen::<f32>() < 1.0 - (0.92 + 0.06 * pg[veg::GIRTH]).powi(dt) {
                     out.push(PlantAct::Die(iu));
                     continue;
                 }
                 // natural ageing: soft plants turn over in weeks, wood lives for months
-                if st == 3 && r.gen::<f32>() < pdt(0.06 * (1.0 + 2.0 * pg[veg::ANNUAL]) / (1.0 + 6.0 * pg[veg::WOOD] + 2.0 * pg[veg::GIRTH]), dt) {
+                if st == 3 && r.gen::<f32>() < pdt(0.03 * (1.0 + 3.0 * pg[veg::ANNUAL]) / (1.0 + 6.0 * pg[veg::WOOD] + 2.0 * pg[veg::GIRTH]), dt) {
                     out.push(PlantAct::Die(iu));
                     continue;
                 }
@@ -2213,7 +2234,7 @@ impl Sim {
                     if pass(&mut r, 0.65) {
                         out.push(PlantAct::Grow(iu, st + 1));
                     }
-                } else if pass(&mut r, 0.35 * seed_crowd * (1.0 + 0.6 * pg[veg::ANNUAL])) {
+                } else if pass(&mut r, 0.35 * if terr == 1 { seed_crowd_w } else { seed_crowd } * (1.0 + 0.6 * pg[veg::ANNUAL])) {
                     // runners/rhizomes: an identical clone next door; otherwise a seed
                     let clone = r.gen::<f32>() < 0.7 * pg[veg::CLONAL];
                     let reach = if clone { 2 } else { 2.max((3.0 + pg[veg::DISPERSAL] * 10.0 + pg[veg::BLOOM] * 6.0) as i32) };
@@ -2247,7 +2268,7 @@ impl Sim {
                         continue;
                     }
                     let id = self.vegetation.ids[i];
-                    let tj = self.tmp[j] as f32 / 255.0 + self.d_t;
+                    let tj = self.temp_at(j);
                     if Vegetation::suitability_of(&self.vegetation.lineages[id as usize], self.moisture[j], tj, self.terr[j] == 1) > 0.2 {
                         self.setp(j, 1, Some(id));
                     }
@@ -2265,7 +2286,7 @@ impl Sim {
                     let t = self.t;
                     let annual = self.vegetation.lineage(i).g[veg::ANNUAL];
                     let child = self.vegetation.seed(&mut self.rng, i, j, t);
-                    let tj = self.tmp[j] as f32 / 255.0 + self.d_t;
+                    let tj = self.temp_at(j);
                     if self.vegetation.suitability(j, self.moisture[j], tj, self.terr[j] == 1) > 0.2
                         && self.rr() > 0.7 * self.vegetation.crowding(j, &self.pl)
                     {
@@ -2376,7 +2397,8 @@ let __t1 = std::time::Instant::now();
                     self.fert[i] = (self.fert[i] + 0.04).min(1.0);
                     if let Some(lin) = p.seed {
                         // dung-dispersed seeds still compete for room (up to ~1.5x carrying capacity)
-                        let room = if self.crowd > 0.0 { 1.0 } else { (1.0 - self.nplants as f32 / (self.land as f32 * 0.15).max(1.0)).max(0.0) };
+                        let lp = (self.nplants - self.nwater_plants) as f32;
+                        let room = if self.crowd > 0.0 { 1.0 } else { (1.0 - lp / (self.land as f32 * 0.19).max(1.0)).max(0.0) };
                         if self.pl[i] == 0 && self.rr() < room {
                             self.sow_lineage(i, lin);
                         }
@@ -2543,7 +2565,7 @@ let __t4 = std::time::Instant::now();
     /// plant that suits the site. Only bare regions get the ancestral pioneer lineage.
     fn sprout(&mut self, i: usize) {
         let (w, h) = (self.w, self.h);
-        let ti = self.tmp[i] as f32 / 255.0 + self.d_t;
+        let ti = self.temp_at(i);
         let mut seen_any = false;
         for _ in 0..12 {
             let x = (i % w) as i32 + self.rng.gen_range(-4..=4);
@@ -2576,7 +2598,7 @@ let __t4 = std::time::Instant::now();
         self.vegetation.ids[i] = lin;
         let t = self.t;
         let child = self.vegetation.seed(&mut self.rng, i, i, t);
-        let ti = self.tmp[i] as f32 / 255.0 + self.d_t;
+        let ti = self.temp_at(i);
         if self.vegetation.suitability(i, self.moisture[i], ti, self.terr[i] == 1) > 0.15 {
             self.setp(i, 1, Some(child));
         } else {

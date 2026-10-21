@@ -2,7 +2,8 @@
 //! The simulation runs on its own thread (with rayon for perception/plant sweeps);
 //! the GPU scales the native-resolution world image and draws the UI.
 use evosim::genome::*;
-use evosim::render::{plant_sprite, portrait, WorldRenderer};
+use evosim::render::{celsius, metres, plant_sprite, portrait, MapMode, WorldRenderer, ELEV_RAMP, MOIST_RAMP, TEMP_RAMP};
+use evosim::worldgen::{Biome, MapType};
 use evosim::save::*;
 use evosim::sim::*;
 use evosim::util::{hsv, scale, Col};
@@ -162,6 +163,7 @@ struct App {
     last_save: Instant,
     saving: Arc<AtomicBool>,
     mouse_d: Vec2,
+    map_mode: MapMode,
 }
 
 fn mapw() -> f32 {
@@ -949,7 +951,7 @@ fn draw_main(app: &mut App, s: &Sim, recompose: bool) {
     let need_new = app.tex.as_ref().map_or(true, |t| t.width() as usize != s.w || t.height() as usize != s.h);
     if recompose || need_new {
         let rect = (v.x as i32 - 1, v.y as i32 - 1, (v.x + mw / v.z) as i32 + 2, (v.y + mh / v.z) as i32 + 2);
-        app.rend.compose(s, rect, app.sel);
+        app.rend.compose(s, rect, app.sel, app.map_mode);
         // SAFETY: [u8; 4] has the same layout as 4 consecutive u8
         let bytes: &[u8] = unsafe { std::slice::from_raw_parts(app.rend.px.as_ptr() as *const u8, app.rend.px.len() * 4) };
         if need_new {
@@ -1013,6 +1015,24 @@ fn draw_main(app: &mut App, s: &Sim, recompose: bool) {
         let lab = if l < 100.0 { format!("{} cm", l) } else { format!("{} m", l / 100.0) };
         txt(&lab, bx + off, by - 18.0 + off, FS, col);
     }
+    // ---- map legend for overlays and what is under the cursor
+    draw_legend(app.map_mode, mw);
+    let (mxp, myp) = mouse_position();
+    if mxp < mw && myp < mh {
+        let (wx, wy) = app.to_world(mxp, myp);
+        if wx >= 0.0 && wy >= 0.0 && (wx as usize) < s.w && (wy as usize) < s.h {
+            let i = wy as usize * s.w + wx as usize;
+            let b = Biome::from_u8(s.biome.get(i).copied().unwrap_or(6));
+            let plant = if s.pl[i] > 0 { format!(" | {}", s.vegetation.lineage(i).form().name()) } else { String::new() };
+            let info = format!(
+                "{} | {:.1} C | soil moisture {:.0}% | {:.0} m | fertility {:.0}%{}",
+                b.name(), celsius(s.temp_at(i)), s.moisture[i] as f32 / 2.55, metres(s.elevation[i]), s.fert[i] * 100.0, plant
+            );
+            let wdt = tw(&info, FS) + 12.0;
+            draw_rectangle(mw - wdt - 8.0, mh - 26.0, wdt, 20.0, Color::from_rgba(10, 12, 20, 170));
+            txt(&info, mw - wdt - 2.0, mh - 23.0, FS, [225, 230, 240]);
+        }
+    }
     // ---- side panel
     let px = mw;
     draw_rectangle(px, 0.0, PANEL, mh, c(BG));
@@ -1043,6 +1063,43 @@ fn draw_main(app: &mut App, s: &Sim, recompose: bool) {
 }
 const WHITE_C: Col = [245, 245, 245];
 
+fn draw_legend(mode: MapMode, mw: f32) {
+    if mode == MapMode::Terrain {
+        return;
+    }
+    let (x0, y0, wl) = (mw - 250.0, 10.0, 236.0);
+    let rows: Vec<(String, evosim::util::Col)> = match mode {
+        MapMode::Biome => (3..evosim::worldgen::NBIOMES as u8).map(|b| (Biome::from_u8(b).name().to_string(), Biome::from_u8(b).map_col())).collect(),
+        _ => vec![],
+    };
+    let hgt = if rows.is_empty() { 52.0 } else { 26.0 + rows.len() as f32 * 15.0 };
+    draw_rectangle(x0 - 6.0, y0 - 4.0, wl + 12.0, hgt, Color::from_rgba(10, 12, 20, 190));
+    txt(&format!("map: {}   (V: next view)", mode.name()), x0, y0, FS, FG);
+    let gradient = |stops: &[evosim::util::Col], lo: &str, hi: &str| {
+        for k in 0..wl as i32 {
+            let c = evosim::render::ramp(stops, k as f32 / wl);
+            draw_rectangle(x0 + k as f32, y0 + 18.0, 1.0, 10.0, c_(c));
+        }
+        txt(lo, x0, y0 + 31.0, FS - 2.0, DIM);
+        txt(hi, x0 + wl - tw(hi, FS - 2.0), y0 + 31.0, FS - 2.0, DIM);
+    };
+    match mode {
+        MapMode::Temperature => gradient(&TEMP_RAMP, "-20 C", "+40 C"),
+        MapMode::Moisture => gradient(&MOIST_RAMP, "dry", "wet"),
+        MapMode::Elevation => gradient(&ELEV_RAMP, "0 m", "3500 m"),
+        _ => {
+            for (k, (name, col)) in rows.iter().enumerate() {
+                let y = y0 + 20.0 + k as f32 * 15.0;
+                draw_rectangle(x0, y + 2.0, 12.0, 10.0, c_(*col));
+                txt(name, x0 + 18.0, y, FS - 1.0, FG);
+            }
+        }
+    }
+}
+fn c_(col: evosim::util::Col) -> Color {
+    c(col)
+}
+
 fn speed_footer(app: &App) {
     let tps = f64::from_bits(app.sh.tps.load(Ordering::Relaxed));
     let dt = app.sh.dt.load(Ordering::Relaxed);
@@ -1057,7 +1114,7 @@ fn speed_footer(app: &App) {
 }
 
 // ------------------------------------------------------------------------------- welcome
-async fn welcome(mut index: usize) -> Option<(&'static str, usize)> {
+async fn welcome(mut index: usize, mut map: MapType) -> Option<(&'static str, usize, MapType)> {
     let mut selected = 0usize;
     let buttons = [("primordial", "NEW PRIMORDIAL WORLD"), ("resume", "CONTINUE AUTOSAVE"), ("load", "LOAD QUICKSAVE"), ("animals", "ANIMAL SANDBOX")];
     loop {
@@ -1076,26 +1133,30 @@ async fn welcome(mut index: usize) -> Option<(&'static str, usize)> {
         if is_key_pressed(KeyCode::Up) {
             selected = (selected + 3) % 4;
         }
+        let cycle_map = |m: MapType| MapType::ALL[(MapType::ALL.iter().position(|&x| x == m).unwrap() + 1) % MapType::ALL.len()];
+        if is_key_pressed(KeyCode::Tab) || is_key_pressed(KeyCode::M) {
+            map = cycle_map(map);
+        }
         if is_key_pressed(KeyCode::Down) {
             selected = (selected + 1) % 4;
         }
         if (is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::KpEnter)) && enabled[selected] {
-            return Some((buttons[selected].0, index));
+            return Some((buttons[selected].0, index, map));
         }
         if is_key_pressed(KeyCode::P) {
-            return Some(("primordial", index));
+            return Some(("primordial", index, map));
         }
         if is_key_pressed(KeyCode::C) && enabled[1] {
-            return Some(("resume", index));
+            return Some(("resume", index, map));
         }
         if is_key_pressed(KeyCode::L) && enabled[2] {
-            return Some(("load", index));
+            return Some(("load", index, map));
         }
         let mp = vec2(mouse_position().0, mouse_position().1);
         if is_mouse_button_pressed(MouseButton::Left) {
             for (j, r) in rects.iter().enumerate() {
                 if r.contains(mp) && enabled[j] {
-                    return Some((buttons[j].0, index));
+                    return Some((buttons[j].0, index, map));
                 }
             }
         }
@@ -1107,7 +1168,14 @@ async fn welcome(mut index: usize) -> Option<(&'static str, usize)> {
         txt(line, sw / 2.0 - tw(line, FS) / 2.0, 164.0, FS, DIM);
         let (nm, w, h) = WORLDS[index];
         let line = format!("<  {}  {}x{} cells  >    LEFT / RIGHT: world size", nm, w, h);
-        txt(&line, sw / 2.0 - tw(&line, FS) / 2.0, 205.0, FS, DIM);
+        txt(&line, sw / 2.0 - tw(&line, FS) / 2.0, 196.0, FS, DIM);
+        let line = format!("map: {}    TAB or click: continents / pangaea / archipelago", map.name());
+        let mr = Rect::new(sw / 2.0 - tw(&line, FS) / 2.0 - 6.0, 212.0, tw(&line, FS) + 12.0, 18.0);
+        draw_rectangle(mr.x, mr.y, mr.w, mr.h, c([24, 29, 38]));
+        txt(&line, mr.x + 6.0, 214.0, FS, [150, 205, 230]);
+        if is_mouse_button_pressed(MouseButton::Left) && mr.contains(mp) {
+            map = cycle_map(map);
+        }
         for (j, (_, label)) in buttons.iter().enumerate() {
             let r = rects[j];
             let active = enabled[j] && (r.contains(mp) || selected == j);
@@ -1118,7 +1186,7 @@ async fn welcome(mut index: usize) -> Option<(&'static str, usize)> {
         for (j, line) in [
             "Primordial: all animals descend from the starting colonies.",
             "Traits spread through inheritance, survival and reproduction.",
-            "Speeds x1..x5000 and MAX (1 tick = 0.2 s). F5 save / F9 load / autosave every 60 s",
+            "Speeds x1..x5000 and MAX (1 tick = 0.2 s). V: map views. F5 save / F9 load / autosave 60 s",
             "ENTER choose / arrows select / ESC quit",
         ]
         .iter()
@@ -1133,6 +1201,26 @@ async fn welcome(mut index: usize) -> Option<(&'static str, usize)> {
 // ------------------------------------------------------------------------------- main loop
 fn seed() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1)
+}
+
+/// Build a world on a background thread while showing a progress screen.
+async fn make_sim(w: usize, h: usize, primordial: bool, seed: u64, map: MapType) -> Sim {
+    let handle = std::thread::spawn(move || Sim::new_with(w, h, primordial, seed, map));
+    let stages = [(0, "shaping continents"), (20, "raising mountains"), (35, "eroding valleys"), (50, "draining basins"), (60, "computing climate"), (70, "tracing rivers"), (80, "painting biomes"), (100, "seeding life")];
+    while !handle.is_finished() {
+        let p = evosim::worldgen::PROGRESS.load(Ordering::Relaxed);
+        let stage = stages.iter().rev().find(|s| p >= s.0).map_or("", |s| s.1);
+        clear_background(c(BG));
+        let (sw, shh) = (screen_width(), screen_height());
+        let title = format!("Generating {} world {}x{}", map.name(), w, h);
+        txt(&title, sw / 2.0 - tw(&title, FB) / 2.0, shh / 2.0 - 40.0, FB, [120, 220, 160]);
+        let bw = 420.0;
+        draw_rectangle(sw / 2.0 - bw / 2.0, shh / 2.0, bw, 12.0, c([36, 40, 54]));
+        draw_rectangle(sw / 2.0 - bw / 2.0, shh / 2.0, bw * p as f32 / 100.0, 12.0, c([110, 200, 140]));
+        txt(stage, sw / 2.0 - tw(stage, FS) / 2.0, shh / 2.0 + 22.0, FS, DIM);
+        next_frame().await;
+    }
+    handle.join().expect("world generation failed")
 }
 
 fn world_index(name: &str) -> Option<usize> {
@@ -1153,14 +1241,21 @@ async fn amain() {
             }
         }
     }
+    let mut map_type = args
+        .iter()
+        .position(|a| a == "--map")
+        .and_then(|p| args.get(p + 1))
+        .and_then(|m| MapType::ALL.iter().copied().find(|t| t.name() == m.as_str()))
+        .unwrap_or(MapType::Continents);
     let flags = ["--primordial", "--animals", "--world", "--load", "--new"];
     let mut choice = None;
     if !args.iter().any(|a| flags.contains(&a.as_str())) {
-        match welcome(windex).await {
+        match welcome(windex, map_type).await {
             None => return,
-            Some((c, i)) => {
+            Some((c, i, m)) => {
                 choice = Some(c);
                 windex = i;
+                map_type = m;
             }
         }
     }
@@ -1191,7 +1286,7 @@ async fn amain() {
     }
     let (mut sim, view, si, paused) = match snap {
         Some(s) => (s.sim, Some(s.view), s.speed_index.min(SPEEDS.len() - 1), s.paused),
-        None => (Sim::new(ww, wh, primordial, seed()), None, 2, false),
+        None => (make_sim(ww, wh, primordial, seed(), map_type).await, None, 2, false),
     };
     if let Some(n) = args.iter().position(|a| a == "--warmup").and_then(|p| args.get(p + 1)).and_then(|v| v.parse::<i64>().ok()) {
         let end = sim.t + n;
@@ -1229,6 +1324,7 @@ async fn amain() {
         last_save: Instant::now(),
         saving: Arc::new(AtomicBool::new(false)),
         mouse_d: Vec2::ZERO,
+        map_mode: MapMode::Terrain,
     };
     {
         let s = sh.sim.lock();
@@ -1242,6 +1338,9 @@ async fn amain() {
     }
     if let Some(p) = args.iter().position(|a| a == "--speed") {
         app.si = args.get(p + 1).and_then(|v| v.parse::<usize>().ok()).unwrap_or(2).min(SPEEDS.len() - 1);
+    }
+    if let Some(m) = args.iter().position(|a| a == "--mapmode").and_then(|p| args.get(p + 1)) {
+        app.map_mode = MapMode::ALL.iter().copied().find(|x| x.name().starts_with(m.as_str())).unwrap_or(MapMode::Terrain);
     }
     if let Some(p) = args.iter().position(|a| a == "--view") {
         match args.get(p + 1).map(|s| s.as_str()) {
@@ -1257,6 +1356,7 @@ async fn amain() {
         (args.get(p + 1).cloned().unwrap_or("evosim.png".into()), args.get(p + 2).and_then(|v| v.parse::<u32>().ok()).unwrap_or(120))
     });
     let mut frame_no = 0u32;
+    let mut pending_world: Option<(usize, usize, bool, MapType)> = None;
     app.set_speed();
     let mut last_frame = Instant::now();
     let mut last_mouse = vec2(mouse_position().0, mouse_position().1);
@@ -1327,6 +1427,10 @@ async fn amain() {
                     if is_key_pressed(KeyCode::T) {
                         app.tv.fs = true;
                     }
+                    if is_key_pressed(KeyCode::V) {
+                        app.map_mode = app.map_mode.next();
+                        s.logmsg(format!("Map view: {}", app.map_mode.name()), [150, 200, 230]);
+                    }
                     if is_key_pressed(KeyCode::R) || is_key_pressed(KeyCode::N) {
                         let (w, h) = if is_key_pressed(KeyCode::N) {
                             windex = (world_index(&app.wname).map_or(0, |i| i + 1)) % WORLDS.len();
@@ -1335,13 +1439,7 @@ async fn amain() {
                         } else {
                             (s.w, s.h)
                         };
-                        let prim = s.primordial;
-                        *s = Sim::new(w, h, prim, seed());
-                        app.tv = TreeView::new();
-                        app.rend.reset();
-                        app.sel = None;
-                        app.sel_snap = None;
-                        app.new_view(&s);
+                        pending_world = Some((w, h, s.primordial, s.map_type));
                     }
                     if is_key_pressed(KeyCode::S) {
                         get_screen_data().export_png("evosim.png");
@@ -1472,6 +1570,20 @@ async fn amain() {
             }
         }
         next_frame().await;
+        if let Some((w, h, prim, mt)) = pending_world.take() {
+            // generate off-thread with a progress screen, then swap the world in
+            sh.paused.store(true, Ordering::Relaxed);
+            let fresh = make_sim(w, h, prim, seed(), mt).await;
+            let s = &mut *sh.sim.lock();
+            *s = fresh;
+            app.tv = TreeView::new();
+            app.rend.reset();
+            app.tex = None;
+            app.sel = None;
+            app.sel_snap = None;
+            app.new_view(s);
+            app.set_speed();
+        }
     }
     sh.quit.store(true, Ordering::Relaxed);
     let _ = th.join();

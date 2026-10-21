@@ -4,11 +4,105 @@ use crate::sim::*;
 use crate::util::*;
 use crate::vegetation::*;
 use rand::{Rng as _, SeedableRng};
+use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
 pub const BONE: Col = [232, 226, 196];
 pub const WHITE: Col = [245, 245, 245];
-const PCOL: [Col; 4] = [[0, 0, 0], [52, 96, 50], [60, 138, 58], [112, 196, 70]];
+
+/// What the base map layer shows.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MapMode {
+    Terrain,
+    Temperature,
+    Moisture,
+    Biome,
+    Elevation,
+}
+
+impl MapMode {
+    pub const ALL: [MapMode; 5] = [MapMode::Terrain, MapMode::Temperature, MapMode::Moisture, MapMode::Biome, MapMode::Elevation];
+    pub fn name(self) -> &'static str {
+        match self {
+            MapMode::Terrain => "terrain",
+            MapMode::Temperature => "temperature",
+            MapMode::Moisture => "soil moisture",
+            MapMode::Biome => "biomes",
+            MapMode::Elevation => "elevation",
+        }
+    }
+    pub fn next(self) -> MapMode {
+        let i = Self::ALL.iter().position(|&m| m == self).unwrap();
+        Self::ALL[(i + 1) % Self::ALL.len()]
+    }
+}
+
+#[inline]
+fn mixc(a: u8, b: u8, t: f32) -> u8 {
+    (a as f32 + (b as f32 - a as f32) * t) as u8
+}
+
+/// Multi-stop colour ramp, t in 0..1.
+pub fn ramp(stops: &[Col], t: f32) -> Col {
+    let t = t.clamp(0.0, 1.0) * (stops.len() - 1) as f32;
+    let k = (t as usize).min(stops.len() - 2);
+    mix(stops[k], stops[k + 1], t - k as f32)
+}
+
+pub const TEMP_RAMP: [Col; 6] = [[40, 60, 170], [70, 160, 230], [120, 210, 160], [235, 225, 90], [240, 140, 50], [200, 40, 40]];
+pub const MOIST_RAMP: [Col; 5] = [[170, 120, 60], [215, 195, 110], [120, 180, 90], [40, 130, 110], [30, 70, 170]];
+pub const ELEV_RAMP: [Col; 6] = [[70, 140, 80], [150, 180, 95], [215, 200, 120], [165, 120, 80], [140, 130, 125], [250, 250, 250]];
+
+/// Temperature in degrees C shown for a 0..1 climate value.
+pub fn celsius(t: f32) -> f32 {
+    t * 60.0 - 20.0
+}
+
+/// Elevation in metres for the elevation byte (sea level = worldgen::SEA).
+pub fn metres(e: u8) -> f32 {
+    let sea = crate::worldgen::SEA as f32;
+    if e as f32 >= sea {
+        (e as f32 - sea) * 22.0
+    } else {
+        (e as f32 - sea) * 45.0
+    }
+}
+
+pub fn overlay_color(s: &Sim, i: usize, mode: MapMode) -> Col {
+    let water = s.terr[i] == 1;
+    // a little of the terrain shading keeps relief readable under the overlays
+    let lum = {
+        let b = s.bg[i];
+        (b[0] as f32 * 0.3 + b[1] as f32 * 0.55 + b[2] as f32 * 0.15) / 140.0
+    };
+    let shade = |c: Col| -> Col { if water { c } else { crate::util::scale(c, (0.75 + 0.35 * lum).min(1.15)) } };
+    match mode {
+        MapMode::Terrain => s.bg[i],
+        MapMode::Temperature => {
+            let c = ramp(&TEMP_RAMP, (celsius(s.temp_at(i)) + 20.0) / 60.0);
+            if water { mix(c, [20, 40, 90], 0.35) } else { shade(c) }
+        }
+        MapMode::Moisture => {
+            if water {
+                [25, 55, 140]
+            } else {
+                shade(ramp(&MOIST_RAMP, s.moisture[i] as f32 / 255.0))
+            }
+        }
+        MapMode::Biome => {
+            let b = crate::worldgen::Biome::from_u8(s.biome.get(i).copied().unwrap_or(6));
+            shade(b.map_col())
+        }
+        MapMode::Elevation => {
+            let m = metres(s.elevation[i]);
+            if m < 0.0 {
+                mix([60, 120, 190], [10, 25, 70], (-m / 4000.0).min(1.0))
+            } else {
+                shade(ramp(&ELEV_RAMP, m / 3500.0))
+            }
+        }
+    }
+}
 
 pub struct Canvas<'a> {
     pub w: i32,
@@ -565,61 +659,44 @@ pub fn portrait(c: &Cr, t: i64, dark: f32, pw: i32, ph: i32) -> Vec<[u8; 4]> {
 pub struct WorldRenderer {
     pub px: Vec<[u8; 4]>,
     base: Vec<[u8; 4]>,
-    base_key: (u64, usize),
+    base_key: (u64, usize, u8, i64),
     pub sprites: FxHashMap<(u32, u8, u8), Sprite>,
     sprite_epoch: u32,
 }
 
 impl WorldRenderer {
     pub fn new() -> Self {
-        WorldRenderer { px: vec![], base: vec![], base_key: (u64::MAX, 0), sprites: FxHashMap::default(), sprite_epoch: 0 }
+        WorldRenderer { px: vec![], base: vec![], base_key: (u64::MAX, 0, 0, 0), sprites: FxHashMap::default(), sprite_epoch: 0 }
     }
 
     pub fn reset(&mut self) {
         self.sprites.clear();
-        self.base_key = (u64::MAX, 0);
+        self.base_key = (u64::MAX, 0, 0, 0);
     }
 
     /// Compose the world at native resolution. `rect` = visible region (x0,y0,x1,y1) to limit work.
-    pub fn compose(&mut self, s: &Sim, rect: (i32, i32, i32, i32), sel: Option<u32>) {
+    pub fn compose(&mut self, s: &Sim, rect: (i32, i32, i32, i32), sel: Option<u32>, mode: MapMode) {
         let (w, h) = (s.w as i32, s.h as i32);
         let n = s.n;
         if self.px.len() != n {
             self.px = vec![[0, 0, 0, 255]; n];
             self.base = vec![[0, 0, 0, 255]; n];
-            self.base_key = (u64::MAX, 0);
+            self.base_key = (u64::MAX, 0, 0, 0);
         }
         // terrain base layer with sparse land details (rebuilt only when the terrain changes)
-        let key = (s.bg_version, s.n);
+        // base layer: terrain colours or a data overlay (rebuilt only when something it shows changes)
+        let tbucket = if mode == MapMode::Temperature { (s.d_t * 200.0) as i64 } else { 0 };
+        let key = (s.bg_version, s.n, mode as u8, tbucket);
         if self.base_key != key {
             self.base_key = key;
-            for i in 0..n {
-                let c = s.bg[i];
-                self.base[i] = [c[0], c[1], c[2], 255];
-            }
-            let mut i = 0;
-            while i < n {
-                let (x, y) = ((i % s.w) as i32, (i / s.w) as i32);
-                if s.terr[i] == 2 {
-                    self.base[i] = [132, 132, 142, 255];
-                } else if s.terr[i] != 1 && (i * 17) % 11 == 0 {
-                    self.base[i] = [119, 105, 73, 255];
-                }
-                let _ = (x, y);
-                i += 43;
-            }
-            for &sp in &s.springs {
-                let i = sp as usize;
-                let (x, y) = ((i % s.w) as i32, (i / s.w) as i32);
-                for dx in -1..=1 {
-                    if x + dx >= 0 && x + dx < w {
-                        self.base[(y * w + x + dx) as usize] = [89, 165, 190, 255];
-                    }
-                }
-                if y > 0 {
-                    self.base[((y - 1) * w + x) as usize] = [125, 188, 205, 255];
-                }
-            }
+            let base: Vec<[u8; 4]> = (0..n)
+                .into_par_iter()
+                .map(|i| {
+                    let c = overlay_color(s, i, mode);
+                    [c[0], c[1], c[2], 255]
+                })
+                .collect();
+            self.base = base;
         }
         let (rx0, ry0, rx1, ry1) = (rect.0.max(0), rect.1.max(0), rect.2.min(w), rect.3.min(h));
         // margins so sprites partially outside the view still draw
@@ -629,17 +706,22 @@ impl WorldRenderer {
             for x in mx0..mx1 {
                 let i = row + x as usize;
                 let st = s.pl[i];
-                self.px[i] = if st > 0 {
-                    let c = PCOL[st as usize];
-                    [c[0], c[1], c[2], 255]
+                self.px[i] = if st > 0 && mode == MapMode::Terrain {
+                    // ground cover tinted by the lineage's own leaf colour
+                    let hue = s.vegetation.lineage(i).g[HUE];
+                    let c = hsv(hue, 42.0 + st as f32 * 8.0, 26.0 + st as f32 * 13.0);
+                    let b = self.base[i];
+                    // algae stay a subtle tint so lakes and seas keep their colour
+                    let k = if s.terr[i] == 1 { 0.18 + 0.06 * st as f32 } else { 0.55 + 0.15 * st as f32 };
+                    [mixc(b[0], c[0], k), mixc(b[1], c[1], k), mixc(b[2], c[2], k), 255]
                 } else {
                     self.base[i]
                 };
             }
         }
         // animated water glints
-        let mut i = (my0 * w + mx0) as usize;
-        let end = (my1 * w) as usize;
+        let mut i = if mode == MapMode::Terrain { (my0 * w + mx0) as usize } else { usize::MAX - 64 };
+        let end = if mode == MapMode::Terrain { (my1 * w) as usize } else { 0 };
         i += (43 - i % 43) % 43;
         while i < end {
             let x = (i % s.w) as i32;
@@ -697,7 +779,7 @@ impl WorldRenderer {
             cv.set((i as usize % s.w) as i32, (i as usize / s.w) as i32, [255, (120 + (s.t + i as i64) % 120) as u8, 35]);
         }
         // trees: visible ones, back to front
-        let mut trees: Vec<u32> = s
+        let mut trees: Vec<u32> = if mode != MapMode::Terrain { Vec::new() } else { s
             .vegetation
             .trees
             .iter()
@@ -706,7 +788,7 @@ impl WorldRenderer {
                 let (x, y) = ((i as usize % s.w) as i32, (i as usize / s.w) as i32);
                 x >= mx0 - 12 && x < mx1 + 12 && y >= my0 && y < my1 + 40
             })
-            .collect();
+            .collect() };
         trees.sort_unstable();
         if self.sprites.len() > 12000 || self.sprite_epoch != s.vegetation.epoch {
             self.sprites.clear();

@@ -196,6 +196,8 @@ pub struct Vegetation {
     pub died: Vec<Option<i64>>,
     /// Lineage ids are renumbered when the record is compacted; renderers key caches on this.
     pub epoch: u32,
+    /// Pioneer lineages adapted to climate bands (temperature x moisture), used for spontaneous sprouts.
+    pub pioneers: Vec<u32>,
     /// Total lineages ever created (compaction removes forgotten extinct twigs from `lineages`).
     pub total_created: u64,
     #[serde(skip)]
@@ -219,9 +221,50 @@ impl Vegetation {
             peaks: vec![0, 0],
             died: vec![None, None],
             epoch: 0,
+            pioneers: vec![],
             total_created: 2,
             trees: FxHashSet::default(),
         }
+        .with_pioneers(primordial)
+    }
+
+    const PT: [f32; 6] = [0.12, 0.27, 0.42, 0.57, 0.72, 0.88];
+    const PM: [f32; 3] = [0.22, 0.52, 0.82];
+
+    /// The world starts with a simple flora already spread across climates: one pioneer per band,
+    /// descended from the ancestral grass (cold ones sleep through winter, dry ones store water).
+    fn with_pioneers(mut self, primordial: bool) -> Self {
+        for &t in &Self::PT {
+            for &m in &Self::PM {
+                let mut p = self.lineages[1];
+                p.id = self.lineages.len() as u32;
+                p.parent = Some(1);
+                p.g[TEMPERATURE] = t;
+                p.g[MOISTURE] = m;
+                p.g[DECIDUOUS] = if t < 0.35 { 0.55 } else { 0.2 };
+                p.g[ROOTS] = if m < 0.3 { 0.35 } else { 0.0 };
+                p.g[SUCCULENCE] = if m < 0.3 && t > 0.5 { 0.35 } else { 0.0 };
+                p.g[HEIGHT] = if primordial { 0.1 } else { 0.18 + 0.12 * m };
+                p.g[HUE] = 70.0 + 60.0 * m + 25.0 * (1.0 - t);
+                self.pioneers.push(p.id);
+                self.lineages.push(p);
+                self.counts.push(0);
+                self.peaks.push(0);
+                self.died.push(None);
+            }
+        }
+        self.total_created = self.lineages.len() as u64;
+        self
+    }
+
+    /// Pioneer lineage best suited to a site (falls back to the ancestral grass).
+    pub fn pioneer(&self, temperature: f32, moisture: f32) -> u32 {
+        if self.pioneers.len() != Self::PT.len() * Self::PM.len() {
+            return 1;
+        }
+        let ti = Self::PT.iter().enumerate().min_by(|a, b| (a.1 - temperature).abs().total_cmp(&(b.1 - temperature).abs())).unwrap().0;
+        let mi = Self::PM.iter().enumerate().min_by(|a, b| (a.1 - moisture).abs().total_cmp(&(b.1 - moisture).abs())).unwrap().0;
+        self.pioneers[ti * Self::PM.len() + mi]
     }
 
     #[inline]
@@ -361,6 +404,9 @@ impl Vegetation {
         let mut keep = vec![false; n];
         keep[0] = true;
         keep[1] = true;
+        for &p in &self.pioneers {
+            keep[p as usize] = true;
+        }
         // living lineages and their whole ancestry
         for i in 0..n {
             if self.counts[i] > 0 {
@@ -422,6 +468,9 @@ impl Vegetation {
                     1
                 }
             };
+        }
+        for p in self.pioneers.iter_mut() {
+            *p = map[p];
         }
         self.lineages = lineages;
         self.counts = counts;

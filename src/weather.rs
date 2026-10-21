@@ -69,7 +69,7 @@ impl Atmosphere {
     pub fn temperature(&self, tmp: &[u8], d_t: f32, w: usize, i: usize) -> f32 {
         let (x, y) = ((i % w) as f32, (i / w) as f32);
         let k = self.key(x, y);
-        tmp[i] as f32 / 255.0 + d_t - 0.035 * self.shade[k] - 0.025 * self.rain[k].min(1.0)
+        tmp[i] as f32 / 255.0 + d_t * crate::sim::season_amp(i / w, self.height) - 0.035 * self.shade[k] - 0.025 * self.rain[k].min(1.0)
     }
 
     fn footprint(&self, c: &Cloud, out: &mut Vec<usize>) {
@@ -115,7 +115,13 @@ impl Sim {
         let i = y * self.w + x;
         self.atmosphere.deposited += d.water;
         if d.snow {
-            *self.atmosphere.snow.entry(i as u32).or_default() += d.water;
+            // snow cover is tracked on a bounded number of cells (glaciers are drawn from the biome map)
+            let len = self.atmosphere.snow.len();
+            if let Some(v) = self.atmosphere.snow.get_mut(&(i as u32)) {
+                *v = (*v + d.water).min(4.0);
+            } else if len < 20_000 {
+                self.atmosphere.snow.insert(i as u32, d.water);
+            }
             return;
         }
         let k = self.atmosphere.key(d.x, d.y);
@@ -185,7 +191,7 @@ impl Sim {
                 23.0
             };
             let nv = self.atmosphere.vapor.len();
-            let maxc = 12.max(self.n / 3500);
+            let maxc = 12.max(self.n / 9000);
             for _ in 0..32.min(nv) {
                 let k = self.rng.gen_range(0..nv);
                 let a = &mut self.atmosphere;

@@ -15,13 +15,38 @@ cargo run --release
 Requires Rust (rustup). The first build downloads dependencies (~1 min).
 
 The welcome screen offers a new primordial world, continuing the autosave, loading the quicksave, or the animal sandbox.
-Use left/right to choose a map size (`small` 340x230 … `giant` 1600x1060 (default) … `colossal` 2048x1360).
+Left/right choose the map size (`small` 340x230 … `giant` 1600x1060 (default) … `colossal` 2048x1360, `titan` 3072x2048,
+`planet` 4096x2730); `Tab` (or a click) chooses the map type: **continents**, **pangaea** or **archipelago**.
+Large maps take a while to generate (a progress screen is shown; `planet` ~10–30 s).
+
+## World generation
+
+1. **Land and sea**: domain-warped fractal noise. *Continents*: several landmasses grown from separated cores with open ocean
+   between them; *pangaea*: one supercontinent; *archipelago*: many islands of all sizes.
+2. **Mountains**: ridged multifractal noise inside mountain belts that cover a fixed share of the land (mountains, alpine
+   meadows and high glaciers stay under ~10% of the land); continental interiors are low plains and plateaus.
+3. **Erosion**: hundreds of thousands of water droplets carve gullies and deposit sediment.
+4. **Drainage**: a priority-flood finds where every cell drains; closed basins become lakes.
+5. **Climate**: temperature from latitude (cold north, hot south), altitude lapse rate and the ocean's moderating effect;
+   seasons swing harder in the north. Rain is carried by the west wind and wrung out on windward slopes, leaving rain shadows
+   (deserts) behind ranges; plus a dry subtropical belt and wet tropics.
+6. **Rivers**: rain accumulated downhill along the drainage tree; big flows become rivers that branch, widen, carve valleys and
+   end in lakes or the sea. Rivers can be waded across; lakes and seas need swimmers.
+7. **Biomes** from temperature and moisture: ocean, lake, river, beach, desert, savanna, grassland, temperate forest,
+   rainforest, swamp, taiga, tundra, alpine meadow, mountain rock, glacier. Each biome sets soil fertility; temperature
+   and soil moisture decide which plants can grow and how much animals spend on staying warm or cool.
+   The world starts with pioneer plants adapted to each climate band; animal numbers scale with the land area.
+
+`V` cycles the map view: terrain (hill-shaded relief), **temperature** (live, including the season), soil moisture, biomes,
+elevation — with a legend. Hovering the map shows biome, °C, moisture, elevation and fertility under the cursor.
+`cargo run --release --example terrain -- 1600 1060 <seed> [biome|temp|moist] <continents|pangaea|archipelago>` renders a
+map to `terrain.png`.
 
 Direct launch options:
 
 ```sh
 cargo run --release -- --primordial --world giant
-cargo run --release -- --animals --world small
+cargo run --release -- --animals --world small --map archipelago
 cargo run --release -- --world 2000x1200
 cargo run --release -- --load saves/quicksave.evo2
 cargo run --release -- --animals --warmup 200000      # simulate 200k ticks before showing the world
@@ -42,8 +67,9 @@ The panel shows the requested speed and the **actual** speed reached. The step i
 1-tick steps whenever the computer keeps up, and only switches to coarser 2/4/8-tick steps (like the old “hyperspeed”) when it
 would otherwise fall behind. Steps never exceed 8 ticks, because creatures can eat at most once per step.
 
-Measured on the same 2-core cloud VM (Python → Rust, ticks/s): giant map 149 → 5 765 (x1150 real time),
-small map 1 884 → 99 000. A desktop CPU with more cores is faster still.
+Measured on a 2-core cloud VM (Python → Rust, ticks/s, before the new world generator): giant map 149 → 5 765,
+small map 1 884 → 99 000. With the richer worlds (more land life, up to 1200 animals) the giant map runs ~2 000–2 400
+ticks/s (x400–x480) on that VM, medium/large maps several times faster. A desktop CPU with more cores is faster still.
 
 ## How it is fast
 
@@ -96,7 +122,7 @@ Forests, conifers, palms and cacti need time: run a world for ~1 million ticks (
 
 ## Controls
 
-- `Space` pause · `R` restart · `N` next map size · `S` screenshot
+- `Space` pause · `R` new world (same size and type) · `N` next map size · `V` map view · `S` screenshot
 - `F5` quicksave · `F9` load quicksave (or autosave). Autosave every 60 s and on exit to `saves/autosave.evo2`.
   Saves are written in the background and atomically. Saves from older versions cannot be loaded (an unreadable
   autosave is kept as `autosave.unreadable.evo2` instead of being overwritten).

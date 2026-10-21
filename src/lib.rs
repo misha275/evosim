@@ -5,3 +5,4 @@ pub mod vegetation;
 pub mod weather;
 pub mod render;
 pub mod save;
+pub mod worldgen;
