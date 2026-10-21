@@ -2,3 +2,8 @@
 /saves
 *.png
 __pycache__/
+*.tgz
+*.exe
+*.zip
+*.tar.gz
+

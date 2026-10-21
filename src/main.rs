@@ -1039,10 +1039,10 @@ fn draw_main(app: &mut App, s: &Sim, recompose: bool) {
     draw_line(px, 0.0, px, mh, 1.0, c([50, 56, 76]));
     let (x, w) = (px + 10.0, PANEL - 20.0);
     let seas = ["spring", "summer", "autumn", "winter"][(4 * (s.t % SEASON) / SEASON) as usize];
-    txt("EVOSIM", x, 5.0, FB, [120, 220, 160]);
+    txt(&format!("EVOSIM {}", env!("CARGO_PKG_VERSION")), x, 5.0, FB, [120, 220, 160]);
     txt(
         &format!("day {}  {}  {}  {}{}", s.t / DAY + 1, seas, if s.dark > 0.5 { "night" } else { "day" }, speed_label(app.si), if app.paused { "  PAUSED" } else { "" }),
-        x + 82.0, 9.0, FS, DIM,
+        x + 150.0, 9.0, FS, DIM,
     );
     let mg = s.crs.iter().map(|c| c.gen).max().unwrap_or(0);
     txt(&format!("pop {}   species {} alive / {} total   max gen {}", s.crs.len(), s.alive_species(), s.species.len(), mg), x, 27.0, FS, FG);
@@ -1164,7 +1164,7 @@ async fn welcome(mut index: usize, mut map: MapType) -> Option<(&'static str, us
         let title = "EVOSIM";
         let ts = 84.0;
         txt(title, sw / 2.0 - tw(title, ts) / 2.0, 70.0, ts, [120, 220, 160]);
-        let line = "From microbial colonies to branching ecosystems";
+        let line = concat!("From microbial colonies to branching ecosystems  -  v", env!("CARGO_PKG_VERSION"));
         txt(line, sw / 2.0 - tw(line, FS) / 2.0, 164.0, FS, DIM);
         let (nm, w, h) = WORLDS[index];
         let line = format!("<  {}  {}x{} cells  >    LEFT / RIGHT: world size", nm, w, h);
@@ -1591,7 +1591,7 @@ async fn amain() {
 
 fn conf() -> Conf {
     Conf {
-        window_title: "EVOSIM".to_owned(),
+        window_title: format!("EVOSIM {}", env!("CARGO_PKG_VERSION")),
         window_width: 1420,
         window_height: 760,
         window_resizable: true,

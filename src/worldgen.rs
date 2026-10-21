@@ -679,6 +679,9 @@ pub fn generate(w: usize, h: usize, map: MapType, rng: &mut Rng) -> World {
             2 => Biome::Lake,
             3 => Biome::River,
             _ => {
+                // wavy, natural borders between biomes: classify on slightly perturbed climate
+                let wob = (fbm(x as f32 / 16.0, y as f32 / 16.0, 3, seed ^ 0xb10e) - 0.5) * 0.16;
+                let (t, moist) = (t + wob * 0.6, moist + wob);
                 let snowline = 0.62 + 0.5 * (t - 0.3);
                 if land_h > snowline.max(0.45) || t < 0.07 {
                     Biome::Glacier
@@ -714,7 +717,7 @@ pub fn generate(w: usize, h: usize, map: MapType, rng: &mut Rng) -> World {
             }
         };
         out.biome[i] = biome as u8;
-        let nz = (hash(x as i32, y as i32, seed ^ 0x5151) - 0.5) * 14.0;
+        let nz = (hash(x as i32, y as i32, seed ^ 0x5151) - 0.5) * 7.0;
         let jitter = |c: Col, k: f32| -> Col {
             [
                 (c[0] as f32 * k + nz).clamp(0.0, 255.0) as u8,
@@ -746,15 +749,17 @@ pub fn generate(w: usize, h: usize, map: MapType, rng: &mut Rng) -> World {
                     _ => 0,
                 };
                 out.fert[i] = (biome.fertility() * (0.75 + 0.5 * moist) * (0.85 + 0.3 * hash(x as i32, y as i32, seed ^ 0x777))).min(1.0);
-                // ground colour darkens/lightens with altitude, then the hill shade
+                // the land is drawn flat: only mountains rise (relief shading and rock tones fade in with height)
+                let relief = smooth(0.16, 0.3, land_h);
                 let mut c = biome.ground();
-                if biome != Biome::Glacier && biome != Biome::Mountain {
-                    c = mix(c, [150, 140, 125], (land_h * 1.2).min(0.5));
-                }
                 if biome == Biome::Mountain {
                     c = mix(c, [150, 145, 140], ((land_h - 0.55) * 2.0).clamp(0.0, 1.0));
+                } else if biome != Biome::Glacier {
+                    c = mix(c, [140, 134, 118], relief * 0.45);
                 }
-                out.bg[i] = jitter(c, shade);
+                // plains keep a faint hint of their gentle undulation; mountains get the full relief
+                let k = 1.0 + (shade - 1.0) * (0.18 + 0.82 * relief);
+                out.bg[i] = jitter(c, k);
             }
         }
         out.moisture[i] = match out.terr[i] {
