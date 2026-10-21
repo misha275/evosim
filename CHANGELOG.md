@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.4.0
+- Microbial colonies are drawn 2x1 (small, horizontal) up to 2x2 (large); colonial life shows a second cell type.
+- Fix: in primordial worlds the colonies filled the population limit within ~1000 ticks (free photosynthesis and
+  plant meals worth hundreds of ticks), so no one could be born and every new species died as a single individual.
+  Colonies now share a regenerating nutrient pool in the water and get meals scaled to their size, so their numbers are
+  limited by food: populations fluctuate below the limit and new species can spread (3x more living species).
+- Predators get the whole carcass from a kill (previously they starved between kills).
+- `cargo run --release --example inspect -- saves/autosave.evo2` prints a summary of a saved world.
+
 ## 2.3.1
 - Plains show a faint hint of relief (about a fifth of the mountain shading).
 

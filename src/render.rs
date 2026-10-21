@@ -482,10 +482,15 @@ pub fn plant_sprite(p: &PlantLineage, growth: u8, phase: u8) -> Sprite {
 pub fn draw_cr(cv: &mut Canvas, c: &Cr, t: i64, dark: f32, cx: f32, cy: f32) {
     let g = &c.g;
     let f = c.f as i32;
-    if g.v[COMPLEXITY] < 0.22 {
+    if g.v[COMPLEXITY] < 0.42 {
+        // microbial colonies: 2x1 (horizontal) when small, 2x2 when grown large
         let (x, y) = (cx as i32, cy as i32);
-        cv.fill(x, y, 2, 2, c.col);
+        let tall = c.s >= 0.3;
+        cv.fill(x, y, 2, if tall { 2 } else { 1 }, c.col);
         cv.set(x, y, c.lt);
+        if tall && g.v[COMPLEXITY] >= 0.22 {
+            cv.set(x + 1, y + 1, c.c2); // colonial life: a second cell type
+        }
         return;
     }
     let cy = cy - c.z;

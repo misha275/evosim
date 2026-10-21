@@ -25,7 +25,10 @@ fn main() {
             let gl = (0..s.n).filter(|&i| s.pl[i] >= 2 && s.terr[i] != 1).count();
             let herb = s.crs.iter().filter(|c| c.g.v[evosim::genome::DIET] < 0.45).count();
             let me: f32 = s.crs.iter().map(|c| c.e / c.max_e).sum::<f32>() / s.crs.len().max(1) as f32;
-            println!("   grown-land {} herb {} mean-energy {:.2} sick {}", gl, herb, me, s.nsick);
+            let omni = s.crs.iter().filter(|c| { let d = c.g.v[evosim::genome::DIET]; d >= 0.45 && d <= 0.65 }).count();
+            let carn = s.crs.iter().filter(|c| c.g.v[evosim::genome::DIET] > 0.65).count();
+            let ce: f32 = s.crs.iter().filter(|c| c.g.v[evosim::genome::DIET] >= 0.45).map(|c| c.e / c.max_e).sum::<f32>() / (omni + carn).max(1) as f32;
+            println!("   grown-land {} herb {} mean-energy {:.2} sick {} omni {} carn {} pred-energy {:.2}", gl, herb, me, s.nsick, omni, carn, ce);
             println!("t {} pop {} plants {} land {} crowd {:.2} species {}/{} lineages {} tps {:.0}", s.t, s.crs.len(), s.nplants, s.land, s.crowd, s.alive_species(), s.species.len(), s.vegetation.lineages.len(), s.t as f32 / t0.elapsed().as_secs_f32());
         }
     }
@@ -38,6 +41,10 @@ fn main() {
     { let v=&s.vegetation; let mut tot=0f64; let mut acc=[0f64; evosim::vegetation::NPG]; let mut mg=0; for (i,l) in v.lineages.iter().enumerate() { let c=v.counts[i] as f64; if c>0.0 { mg=mg.max(l.generation); tot+=c; for k in 0..evosim::vegetation::NPG { acc[k]+=c*l.g[k] as f64; } } } let names: Vec<String> = evosim::vegetation::TRAITS.iter().map(|(n,k)| format!("{}={:.2}", n, acc[*k]/tot.max(1.0))).collect(); println!("max gen {} mean genes {}", mg, names.join(" ")); }
     println!("forms {:?} land {} cap {} crowd {:.3} poop {}", forms, s.land, s.land as f32*0.1, s.crowd, s.poop.len());
     { let g2 = s.pl.iter().filter(|&&p| p >= 2).count(); let gl = (0..s.n).filter(|&i| s.pl[i] >= 2 && s.terr[i] != 1).count(); let herb_t = s.crs.iter().filter(|c| c.tgt.is_some()).count(); println!("grown {} grown-land {} with-target {}/{}", g2, gl, herb_t, s.crs.len()); }
+    { let cb = s.lin.values().filter(|l| l.par != 0 && s.species[l.sp as usize].founder.v[evosim::genome::DIET] > 0.65).count();
+      let cf = s.lin.values().filter(|l| l.par == 0 && s.species[l.sp as usize].founder.v[evosim::genome::DIET] > 0.65).count();
+      println!("carnivore founders {} births {}", cf, cb); }
+    println!("species with peak>=10: {} of {} | maxpop {}", s.species.iter().filter(|p| p.peak >= 10).count(), s.species.len(), s.maxpop);
     println!("DONE t {} in {:.2}s = {:.0} ticks/s | pop {} plants {} species {} trees {} lineages {}", s.t, el, s.t as f32/el, s.crs.len(), s.nplants, s.alive_species(), s.vegetation.trees.len(), s.vegetation.lineages.len());
 }
 #[allow(dead_code)]

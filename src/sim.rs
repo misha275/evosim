@@ -15,6 +15,8 @@ pub const SEASON: i64 = DAY * 6;
 pub const CH: usize = 8;
 pub const CG: usize = 16;
 pub const CELL_CM: f32 = 10.0;
+/// nutrient pool size of a fully watery 16x16 grid cell
+const NUTRIENT_CAP: f32 = 6.0;
 pub const TICK_S: f32 = 0.2;
 pub const MK: f32 = 0.0032;
 const KREST: f32 = 0.14;
@@ -358,6 +360,12 @@ pub struct Sim {
     pub kmap: FxHashMap<u32, usize>,
     #[serde(skip)]
     pub cgrid: Vec<Vec<u32>>,
+    /// dissolved nutrients per 16x16 grid cell: colonies compete for them (density-dependent growth)
+    #[serde(default)]
+    pub nutrients: Vec<f32>,
+    /// share of water cells per grid cell
+    #[serde(skip)]
+    pub gwater: Vec<f32>,
     #[serde(skip)]
     pub kgrid: Vec<Vec<u32>>,
     /// bumped whenever the terrain background changes (renderer cache key)
@@ -454,6 +462,8 @@ impl Sim {
             idmap: FxHashMap::default(),
             kmap: FxHashMap::default(),
             cgrid: vec![],
+            nutrients: vec![],
+            gwater: vec![],
             kgrid: vec![],
             bg_version: 0,
             prof: [0.0; 8],
@@ -464,6 +474,8 @@ impl Sim {
         s.kgrid = vec![Vec::new(); s.gwc * s.ghc];
         s.next_outbreak = s.rng.gen_range(DAY / 2..=DAY);
         s.mkworld();
+        s.rebuild_water_grid();
+        s.nutrients = s.gwater.iter().map(|&wf| wf * NUTRIENT_CAP).collect();
         // animal numbers scale with the land, not the whole map (oceans feed no land animals)
         let area = (s.land as f32 / 58000.0).max(0.3);
         s.maxpop = 120.max((1200f32.min(300.0 * s.land as f32 / 58000.0)) as usize);
@@ -516,10 +528,34 @@ impl Sim {
         }
         self.cgrid = vec![Vec::new(); self.gwc * self.ghc];
         self.kgrid = vec![Vec::new(); self.gwc * self.ghc];
+        self.rebuild_water_grid();
+        if self.nutrients.len() != self.gwc * self.ghc {
+            self.nutrients = self.gwater.iter().map(|&wf| wf * NUTRIENT_CAP).collect();
+        }
         self.idmap = self.crs.iter().enumerate().map(|(i, c)| (c.id, i)).collect();
         self.kmap = self.cor.iter().enumerate().map(|(i, c)| (c.id, i)).collect();
         self.vegetation.rebuild_trees(&self.pl);
         self.bg_version += 1;
+    }
+
+    fn rebuild_water_grid(&mut self) {
+        let mut g = vec![0f32; self.gwc * self.ghc];
+        for i in 0..self.n {
+            if self.terr[i] == 1 {
+                g[(i / self.w / CG) * self.gwc + (i % self.w) / CG] += 1.0;
+            }
+        }
+        for v in g.iter_mut() {
+            *v /= (CG * CG) as f32;
+        }
+        self.gwater = g;
+    }
+
+    /// Nutrient regeneration per grid cell per tick: the waters as a whole feed roughly 60% of
+    /// the population limit, so colonies are limited by food (turnover, selection) and not by the cap.
+    fn nutrient_regen(&self) -> f32 {
+        let water: f32 = self.gwater.iter().sum::<f32>().max(1.0);
+        self.maxpop as f32 * 0.6 * 0.012 / water
     }
 
     #[inline]
@@ -1691,7 +1727,9 @@ impl Sim {
         let t = self.t;
         let plant = *self.vegetation.lineage(o);
         let pg = &plant.g;
-        c.e += (1.0 - 0.6 * pg[veg::DEFENSE]) * (1.0 - 0.7 * pg[veg::TOXIN]) * self.pl[o] as f32 * 2.2 * (1.0 - c.g.v[DIET] * 1.4).max(0.05) * (0.6 + 0.8 * c.m34) * glut;
+        // a meal scales with the eater: a microscopic colony gets only a nibble
+        let mouth = if c.g.v[COMPLEXITY] < 0.42 { (c.s / 2.0).clamp(0.05, 1.0) } else { 1.0 };
+        c.e += (1.0 - 0.6 * pg[veg::DEFENSE]) * (1.0 - 0.7 * pg[veg::TOXIN]) * self.pl[o] as f32 * 2.2 * (1.0 - c.g.v[DIET] * 1.4).max(0.05) * (0.6 + 0.8 * c.m34) * glut * mouth;
         // poison hurts unless the immune system copes; thorns hurt unless armored
         c.e -= pg[veg::TOXIN] * 10.0 * (1.0 - 0.8 * c.g.v[IMMUNE]);
         c.e -= pg[veg::THORNS] * 6.0 * (1.0 - 0.8 * c.g.v[ARMOR]);
@@ -1933,7 +1971,14 @@ impl Sim {
             c.e -= c.max_e * 0.015 * dtf;
         }
         if c.g.v[COMPLEXITY] < 0.42 && in_water {
-            c.e += 0.035 * dtf * (1.0 - self.dark) * (0.4 + self.moisture[idx] as f32 / 255.0);
+            // photosynthesis / filter feeding draws on the local nutrient pool, shared with neighbours
+            let want = 0.035 * dtf * (1.0 - self.dark) * (0.4 + self.moisture[idx] as f32 / 255.0);
+            let gi = (c.y as usize / CG).min(self.ghc - 1) * self.gwc + (c.x as usize / CG).min(self.gwc - 1);
+            if let Some(pool) = self.nutrients.get_mut(gi) {
+                let take = want.min(*pool);
+                *pool -= take;
+                c.e += take;
+            }
         }
         if c.vx > 0.04 {
             c.f = 1;
@@ -2045,7 +2090,7 @@ impl Sim {
                                 }
                                 if self.rr() < pk {
                                     let o = &self.crs[oj];
-                                    c.e += (o.e * 0.5 + o.s * 4.0) * (0.3 + 0.7 * c.g.v[DIET]) * glut;
+                                    c.e += (o.e * 0.6 + o.s * 10.0) * (0.3 + 0.7 * c.g.v[DIET]) * glut; // the whole carcass, not just its fat
                                     let osick = o.sick.map(|s| s.0);
                                     let venom = o.g.has(VENOMOUS);
                                     if let Some(st) = osick {
@@ -2364,6 +2409,10 @@ let __t0 = std::time::Instant::now();
         }
 let __t1 = std::time::Instant::now();
         self.grow_plants();
+        let regen = self.nutrient_regen() * dtf;
+        for (p, &wf) in self.nutrients.iter_mut().zip(self.gwater.iter()) {
+            *p = (*p + regen * wf).min(wf * NUTRIENT_CAP);
+        }
         self.prof[1] += __t1.elapsed().as_secs_f64();
         // spatial indexes (rebuild grids before corpse_step so it sees current creatures)
         for v in self.cgrid.iter_mut() {
