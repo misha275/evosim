@@ -1,5 +1,30 @@
 # Changelog
 
+## 2.6.0
+- Giants: gigantism is a late innovation. After ~30 generations of complex animals the size limit starts rising from 8
+  up to 26 (reached around generation 120). Big bodies mature later, store far more energy, are safe from small
+  predators, run hot in warm climates and need many plants per meal (each plant gives the same food to everyone).
+- Tree crowns: small animals only nibble the lower leaves of tall trees; big, long-necked or upright animals browse the
+  whole crown and get more from it.
+- New body genes: neck length, stance (four-legged / upright two-legged), back plates / sail, colour lightness and
+  saturation. Effects: long necks reach crowns and see farther but are easier to bite; upright runners are faster and
+  grab prey but carry armor badly; plates and sails shed heat and deter bites but slow down; horns and tail clubs
+  wound predators that fail.
+- Colours matter: camouflage - the closer the body colour to the ground under it (grass, forest, sand, snow), the
+  later it is noticed by predators and by prey; movement and size give animals away, patterns help in cover.
+  Warning colours - vivid animals are avoided by predators as often as vivid animals have really been venomous or
+  spiny (harmless mimics profit too). Dark bodies warm up in the sun, pale ones stay cool. Bright colours and plates
+  help win mates.
+- New animal drawing: arched bodies, long necks, two-legged hunters with heavy tails, plates, sails, scutes, frills,
+  tail clubs, horns; giants up to ~20 px long. The creature panel shows the body plan (e.g. "giant long-necked
+  browser") and how well it is hidden.
+- Balance: meat-eaters have bigger stomachs, rest to digest, hunt prey up to 1.25x their size, keep together in packs
+  and find mates from farther away; diet changes in small steps; specialists digest fully, mixed diets poorly.
+  Predator numbers now cycle with their prey (peaks of 150-380 predators on a giant map).
+- Saves from 2.5 and older cannot be loaded (the genome changed).
+- `cargo run --release --example critters` renders the body plans; `--example closeup -- <ticks> <seed> <prefix>`
+  renders close-ups of a late world.
+
 ## 2.5.0
 - Microbial colonies have their own population limit (60% of the animal limit), independent of animals, and are drawn
   dimmer and half-transparent. The animal sandbox starts without colonies; primordial worlds keep them as the origin of life.

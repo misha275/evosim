@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-const MAGIC: &[u8] = b"EVOSIM-RS\x04\n";
+const MAGIC: &[u8] = b"EVOSIM-RS\x05\n";
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 pub struct View {

@@ -138,7 +138,13 @@ sandbox has none.
 Predators and herbivores: digestion of plants and meat follows steep curves, so specialists do well and omnivores are rare.
 Predators hunt in packs, feed their young from kills and rest when sated; they have their own look (long low body,
 dorsal stripe, fangs, claws) and hunting animations (gallop, pounce, feeding, blood). Swimmers float half-submerged with
-ripples and a wake; shorelines and deep sea are real barriers. `cargo run --release --example critters` renders the poses. Extinction ends that world's living lineages until you restart.
+ripples and a wake; shorelines and deep sea are real barriers.
+
+Body plans and colours evolve and decide survival: long necks browse tree crowns, upright two-legged runners hunt,
+plates and sails cool the body, horns and tail clubs fight back. Colours work as camouflage against the ground under
+the animal, as warning colours (trusted by predators as far as vivid animals are really venomous or spiny) and as
+sun protection. Late in evolution gigantism unlocks: dinosaur-like giants up to size 26.
+`cargo run --release --example critters` renders the body plans and hunting poses. Extinction ends that world's living lineages until you restart.
 
 ## Verification
 

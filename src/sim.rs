@@ -123,6 +123,12 @@ pub struct Cr {
     pub act: u8,
     #[serde(default)]
     pub act_until: i64,
+    /// how much the body stands out against the ground under it (camouflage), ~0.3..1.3
+    #[serde(default)]
+    pub consp: f32,
+    /// warning colouration (vivid colours), 0..1
+    #[serde(default)]
+    pub warn: f32,
 }
 
 /// Short-lived visual effects in the world (blood at a kill, dust of a pounce).
@@ -148,7 +154,7 @@ impl Cr {
             dead: true, gut: VecDeque::new(), wa: 0.0, rest: false, col: [0; 3], dk: [0; 3], lt: [0; 3], c2: [0; 3],
             male: true, preg: None, nut: 0.6, pf: 1.0, mom: None, nurse: 0.0, pers: [0.5; 3], nm: String::new(), mk: 3,
             mkc: [0; 3], kids: Vec::new(), het: 0.0, sick: None, imm: Vec::new(), fv: None, z: 0.0, breath: 1.0,
-            act: 0, act_until: 0,
+            act: 0, act_until: 0, consp: 1.0, warn: 0.0,
         }
     }
     /// A display-only creature built from a genome (phylogeny portraits).
@@ -157,15 +163,11 @@ impl Cr {
         c.dead = false;
         c.g = g.clone();
         c.sp = sp;
-        c.age = g.v[MAT] + 10.0;
+        c.age = mat_age(g) + 10.0;
         c.s = g.v[SIZE];
         c.max_e = 25.0 + 13.0 * c.s;
         c.e = c.max_e;
-        let h = g.hue;
-        c.col = hsv(h, 55.0 + 30.0 * g.v[DIET], 88.0 - 8.0 * g.v[DIET]);
-        c.dk = hsv(h, 70.0, 50.0);
-        c.lt = hsv(h, 30.0, 100.0);
-        c.c2 = hsv(g.hue2, 62.0, 92.0);
+        (c.col, c.dk, c.lt, c.c2) = body_colors(g, 0.0);
         c.mkc = c.lt;
         c
     }
@@ -316,9 +318,12 @@ pub struct Sim {
     /// animals (non-colonies) alive at the start of the current step
     #[serde(skip)]
     pub nanimals: usize,
-    /// plant-eating animals alive (they may fill at most 80% of the limit, leaving room for predators)
+    /// non-predators alive (diet <= 0.65; they may fill at most 80% of the limit, leaving room for predators)
     #[serde(skip)]
     pub nherb: usize,
+    /// how often vivid animals are really defended (venom, spines): predators learn to trust warning colours
+    #[serde(skip)]
+    pub apo_trust: f32,
     pub map_type: crate::worldgen::MapType,
     pub w: usize,
     pub h: usize,
@@ -413,6 +418,7 @@ pub struct Sim {
     /// phase timings in seconds (profiling)
     #[serde(skip)]
     pub prof: [f64; 8],
+
 }
 
 fn susc(o: &mut Cr, st: &Strain, t: i64) -> f32 {
@@ -446,6 +452,7 @@ impl Sim {
             nmicro: 0,
             nanimals: 0,
             nherb: 0,
+            apo_trust: 0.3,
             map_type,
             w,
             h,
@@ -911,14 +918,15 @@ impl Sim {
         };
         let id = self.nid;
         self.nid += 1;
-        let age = if par.is_none() { self.rng.gen_range(0..=(g.v[MAT] as i32)) as f32 } else { 0.0 };
+        let age = if par.is_none() { self.rng.gen_range(0..=(mat_age(&g) as i32)) as f32 } else { 0.0 };
         let nut = 0.6;
         let pf = 0.75 + 0.4 * nut;
-        let gr = (age / g.v[MAT]).min(1.0);
+        let gr = (age / mat_age(&g)).min(1.0);
         let s = g.v[SIZE] * pf * (0.35 + 0.65 * (1.0 - (1.0 - gr).powi(2)));
         let mm = MK * s.powi(3);
         let m34 = mm.powf(0.75);
-        let max_e = 60.0 + 110.0 * mm;
+        // meat-eaters gorge: a bigger stomach carries them between kills
+        let max_e = (60.0 + 110.0 * mm) * (1.0 + 0.8 * meat_eff(g.v[DIET]));
         let pers = [
             (g.v[BOLD] + gauss(&mut self.rng, 0.0, 0.15)).clamp(0.0, 1.0),
             (g.v[SOCIAL] + gauss(&mut self.rng, 0.0, 0.15)).clamp(0.0, 1.0),
@@ -926,22 +934,20 @@ impl Sim {
         ];
         let nm = name(&mut self.rng, 2);
         let het = heterozygosity(&h1, &h2);
-        let hh = g.hue + gauss(&mut self.rng, 0.0, 3.0);
-        let (mut sat, mut val) = (55.0 + 30.0 * g.v[DIET], 88.0 - 8.0 * g.v[DIET] + self.rng.gen_range(-5..=5) as f32);
-        if g.has(CAMOUFLAGE) {
-            sat *= 0.45;
-            val *= 0.75;
-        }
+        let jit = gauss(&mut self.rng, 0.0, 3.0);
+        let hh = g.hue + jit;
+        let (col, dk, lt, c2) = body_colors(&g, jit);
+        let warn = vividness(&g);
         let mk = self.rng.gen_range(1..9u8);
         let mkc = hsv(hh + self.rng.gen_range(-30.0..30.0), 75.0, 100.0);
         let wa = self.rr() * 6.28;
         let c = Cr {
             id, x, y, vx: 0.0, vy: 0.0, f: 1, e: e.unwrap_or(max_e * 0.7), age, s, max_e, m34, cool: 200,
             gen: par.map_or(0, |p| p.1 + 1), sp, tgt: None, thr: None, dead: false, gut: VecDeque::new(), wa, rest: false,
-            col: hsv(hh, sat, val), dk: hsv(hh, 70.0, 50.0), lt: hsv(hh, 30.0, 100.0), c2: hsv(g.hue2, 62.0, 92.0), male,
+            col, dk, lt, c2, male,
             preg: None, nut, pf, mom, nurse: if mom.is_some() { 150.0 + 500.0 * g.v[CARE] } else { 0.0 }, pers, nm, mk,
             mkc, kids: Vec::new(), het, sick: None, imm: Vec::new(), fv: None, z: 0.0, breath: 1.0, act: 0, act_until: 0,
-            hap: Box::new((h1, h2)), g,
+            consp: 1.0, warn, hap: Box::new((h1, h2)), g,
         };
         let spp = &mut self.species[sp as usize];
         spp.pop += 1;
@@ -952,7 +958,7 @@ impl Sim {
             self.nmicro += 1;
         } else {
             self.nanimals += 1;
-            if c.g.v[DIET] < 0.45 {
+            if c.g.v[DIET] <= 0.65 {
                 self.nherb += 1;
             }
         }
@@ -986,7 +992,7 @@ impl Sim {
         let e0 = (0.10 + 0.25 * mom.g.v[CARE]) * mom.max_e;
         for (hd, nd) in sperm {
             // the population limit counts animals only; colonies have their own
-            if self.nanimals >= self.maxpop || (mom.g.v[DIET] < 0.45 && self.nherb >= self.maxpop * 8 / 10) {
+            if self.nanimals >= self.maxpop || (mom.g.v[DIET] <= 0.65 && self.nherb >= self.maxpop * 8 / 10) {
                 break;
             }
             let (hm, nm_) = gamete(&mut self.rng, &mom.hap.0, &mom.hap.1);
@@ -1671,14 +1677,19 @@ impl Sim {
         let vis = g.v[VIS]
             * if g.has(NOCTURNAL) { 0.65 + 0.9 * dk } else { 1.0 - 0.35 * dk }
             * self.wx_vis
-            * (1.0 - 0.3 * self.atmosphere.rain_at(c.x, c.y));
+            * (1.0 - 0.3 * self.atmosphere.rain_at(c.x, c.y))
+            // a long neck or an upright stance lifts the eyes above the grass
+            * (1.0 + 0.2 * g.v[NECK] + 0.12 * g.v[STANCE]);
         let (x, y, v2, cs, sp) = (c.x, c.y, vis * vis, c.s, c.sp);
+        let hunger0 = c.e / c.max_e;
         let (mut thr, mut prey, mut mate) = (None, None, None);
         let (mut td, mut pd, mut md) = (f32::MAX, f32::MAX, f32::MAX);
         let (mut hx, mut hy, mut hn) = (0.0, 0.0, 0);
-        let ready = g.v[COMPLEXITY] >= 0.42 && c.male && c.age >= g.v[MAT] && c.cool <= 0 && c.e >= g.v[THRESH] * c.max_e * 0.8;
+        let ready = g.v[COMPLEXITY] >= 0.42 && c.male && c.age >= mat_age(g) && c.cool <= 0 && c.e >= g.v[THRESH] * c.max_e * 0.8;
         let carn = g.v[DIET] > 0.4;
-        let (gx0, gx1, gy0, gy1) = self.grid_range(x, y, vis);
+        // animals ready to breed find mates from farther away (calls, scent)
+        let mate_r2 = if ready { v2 * 2.56 } else { v2 };
+        let (gx0, gx1, gy0, gy1) = self.grid_range(x, y, mate_r2.sqrt());
         for gy in gy0..=gy1 {
             for gx in gx0..=gx1 {
                 for &oj in &self.cgrid[gy * self.gwc + gx] {
@@ -1689,10 +1700,16 @@ impl Sim {
                     let (dx, dy) = (o.x - x, o.y - y);
                     let mut d = dx * dx + dy * dy;
                     let og = &o.g;
-                    if og.has(CAMOUFLAGE) {
-                        d *= 3.0;
-                    }
+                    // camouflage: bodies matching the ground are seen only up close; movement and size give them away
+                    let mov = if o.vx.abs() + o.vy.abs() > 0.1 { 1.35 } else { 1.0 };
+                    let seen = (o.consp + (0.75 - o.consp) * 0.6 * dk) * mov * (1.0 + 0.04 * (o.s - 6.0).max(0.0)).min(2.0);
+                    d /= (seen * seen).max(0.04);
                     if d > v2 {
+                        if d < mate_r2 && ready && o.sp == sp && !o.male && o.preg.is_none() && o.cool <= 0 && d < md
+                            && o.age >= mat_age(og) && o.e >= og.v[THRESH] * o.max_e * 0.7 {
+                            mate = Some(o.id);
+                            md = d;
+                        }
                         continue;
                     }
                     let kin = o.sp == sp;
@@ -1706,7 +1723,7 @@ impl Sim {
                         && o.preg.is_none()
                         && d < md
                         && o.cool <= 0
-                        && o.age >= og.v[MAT]
+                        && o.age >= mat_age(og)
                         && o.e >= og.v[THRESH] * o.max_e * 0.7
                         && (kin || dist(og, g) < 0.3)
                     {
@@ -1719,7 +1736,13 @@ impl Sim {
                             thr = Some(o.id);
                             td = d;
                         }
-                    } else if carn && o.s < cs * 0.9 && d < pd && dist(og, g) > 0.25 {
+                    } else if carn && o.s < cs * 1.25 && d < pd && dist(og, g) > 0.25 {
+                        // warning colours: predators avoid vivid prey as often as vivid prey has really been
+                        // dangerous (lets harmless mimics profit too), unless starving
+                        let hsh = ((c.id as u64).wrapping_mul(2654435761) ^ (o.id as u64).wrapping_mul(40503) ^ (self.t as u64 >> 7)) % 1000;
+                        if o.warn > 0.0 && hunger0 > 0.2 && (hsh as f32) < 1000.0 * o.warn * self.apo_trust {
+                            continue;
+                        }
                         prey = Some(o.id);
                         pd = d;
                     }
@@ -1779,7 +1802,8 @@ impl Sim {
                         }
                     }
                 }
-                if tg.is_none() && hn >= 2 && (g.has(HERDER) || social > 0.65) {
+                // herds, and predator packs that keep together
+                if tg.is_none() && ((hn >= 2 && (g.has(HERDER) || social > 0.65)) || (carn && hn >= 1 && social > 0.3)) {
                     let (mx, my) = (hx / hn as f32, hy / hn as f32);
                     if (mx - x).powi(2) + (my - y).powi(2) > 36.0 + 100.0 * (1.0 - social) {
                         tg = Some(Tgt::Herd(mx, my));
@@ -1801,6 +1825,50 @@ impl Sim {
                 }
             }
         }
+    }
+
+    /// What the ground under a cell looks like (terrain, plant cover, snow) - the backdrop camouflage must match.
+    pub fn ground_color(&self, i: usize) -> Col {
+        if self.atmosphere.snow.contains_key(&(i as u32)) {
+            return [235, 240, 245];
+        }
+        let b = self.bg[i];
+        let st = self.pl[i];
+        if st > 0 && self.terr[i] != 1 {
+            let c = hsv(self.vegetation.lineage(i).g[veg::HUE], 42.0 + st as f32 * 8.0, 26.0 + st as f32 * 13.0);
+            mix(b, c, 0.55 + 0.15 * st as f32)
+        } else {
+            b
+        }
+    }
+
+    /// How much a body stands out from its surroundings: colour distance to the ground nearby.
+    /// Patterns break the outline where there is cover; the Camouflage quirk hides it further.
+    fn conspicuousness(&self, c: &Cr, idx: usize) -> f32 {
+        let (x, y) = (idx % self.w, idx / self.w);
+        let mut acc = [0u32; 3];
+        let mut n = 0;
+        for (dx, dy) in [(0i32, 0i32), (-2, 0), (2, 0), (0, -2), (0, 2)] {
+            let (xx, yy) = (x as i32 + dx, y as i32 + dy);
+            if xx >= 0 && yy >= 0 && (xx as usize) < self.w && (yy as usize) < self.h {
+                let g = self.ground_color(yy as usize * self.w + xx as usize);
+                for k in 0..3 {
+                    acc[k] += g[k] as u32;
+                }
+                n += 1;
+            }
+        }
+        let gnd = [(acc[0] / n) as f32, (acc[1] / n) as f32, (acc[2] / n) as f32];
+        let b = c.col;
+        let diff = ((b[0] as f32 - gnd[0]).abs() * 0.3 + (b[1] as f32 - gnd[1]).abs() * 0.45 + (b[2] as f32 - gnd[2]).abs() * 0.25) / 255.0;
+        let mut k = 0.3 + 2.4 * diff;
+        if c.g.pat != 0 && self.pl[idx] >= 2 {
+            k -= 0.08;
+        }
+        if c.g.has(CAMOUFLAGE) {
+            k *= 0.7;
+        }
+        k.clamp(0.3, 1.3)
     }
 
     /// Open water = lake or sea (rivers are fords).
@@ -1869,7 +1937,18 @@ impl Sim {
         let pg = &plant.g;
         // a meal scales with the eater: a microscopic colony gets only a nibble
         let mouth = if c.g.v[COMPLEXITY] < 0.42 { (c.s / 2.0).clamp(0.05, 1.0) } else { 1.0 };
-        c.e += (1.0 - 0.6 * pg[veg::DEFENSE]) * (1.0 - 0.7 * pg[veg::TOXIN]) * self.pl[o] as f32 * 2.2 * plant_eff(c.g.v[DIET]) * 1.05 * (0.6 + 0.8 * c.m34) * glut * mouth;
+        // a meal grows in proportion to body mass^0.75 (the same law as the energy bill), so size is neither
+        // a free lunch nor a handicap at the plate; colonies keep their old nibble
+        let bite = if c.g.v[COMPLEXITY] < 0.42 { 0.6 + 0.8 * c.m34 } else { 0.1 + 1.8 * c.m34 };
+        // tree crowns: small animals only nibble the lower leaves, tall ones (size, long neck, upright) browse the whole crown
+        let canopy = if pg[veg::WOOD] > 0.3 && pg[veg::HEIGHT] > 0.45 {
+            let reach = (c.s / 16.0 + 0.7 * c.g.v[NECK] + 0.2 * c.g.v[STANCE]) / pg[veg::HEIGHT];
+            let rf = reach.clamp(0.0, 1.0);
+            (0.45 + 0.55 * rf) * (1.0 + 0.6 * pg[veg::HEIGHT] * rf)
+        } else {
+            1.0
+        };
+        c.e += (1.0 - 0.6 * pg[veg::DEFENSE]) * (1.0 - 0.7 * pg[veg::TOXIN]) * self.pl[o] as f32 * 2.2 * plant_eff(c.g.v[DIET]) * 1.05 * bite.min(3.0) * glut * mouth * canopy;
         // poison hurts unless the immune system copes; thorns hurt unless armored
         c.e -= pg[veg::TOXIN] * 10.0 * (1.0 - 0.8 * c.g.v[IMMUNE]);
         c.e -= pg[veg::THORNS] * 6.0 * (1.0 - 0.8 * c.g.v[ARMOR]);
@@ -1930,14 +2009,14 @@ impl Sim {
         let dtf = dt as f32;
         let q = c.g.q;
         c.age += dtf;
-        let gr = (c.age / c.g.v[MAT]).min(1.0);
+        let gr = (c.age / mat_age(&c.g)).min(1.0);
         if gr < 1.0 {
             c.pf = 0.75 + 0.4 * c.nut;
         }
         c.s = c.g.v[SIZE] * c.pf * (0.35 + 0.65 * (1.0 - (1.0 - gr).powi(2)));
         let mm = MK * c.s.powi(3);
         c.m34 = mm.powf(0.75);
-        c.max_e = 60.0 + 110.0 * mm;
+        c.max_e = (60.0 + 110.0 * mm) * (1.0 + 0.8 * meat_eff(c.g.v[DIET]));
         if c.cool > 0 {
             c.cool -= dt;
         }
@@ -1989,6 +2068,9 @@ impl Sim {
                     c.sick = None;
                 }
             }
+        }
+        if self.every(6, c.id as i64) || c.consp == 0.0 {
+            c.consp = self.conspicuousness(c, idx);
         }
         let hib = q & HIBERNATOR != 0 && temp < 0.32;
         let (mut ux, mut uy) = (0f32, 0f32);
@@ -2076,7 +2158,9 @@ impl Sim {
         c.rest = false;
         if c.thr.is_none() && c.fv.is_none() {
             let noct = q & NOCTURNAL != 0;
-            if hib || (c.tgt.is_none() && hunger > 0.6 && ((noct && self.dark < 0.25) || (!noct && self.dark > 0.75))) {
+            // fed predators lie down to digest between hunts
+            let digest = c.tgt.is_none() && meat_eff(c.g.v[DIET]) > 0.5 && hunger > 0.5;
+            if hib || digest || (c.tgt.is_none() && hunger > 0.6 && ((noct && self.dark < 0.25) || (!noct && self.dark > 0.75))) {
                 c.rest = true;
                 mul = 0.0;
             }
@@ -2089,7 +2173,9 @@ impl Sim {
             };
         }
         let sen = 1.0 - 0.4 * ((c.age / c.g.v[LIFE] - 0.7) / 0.3).max(0.0);
-        let mut sp = c.g.v[SPD] * mul * (0.6 + 0.4 * gr) * sen * (1.0 - 0.35 * sickf);
+        let mut sp = c.g.v[SPD] * mul * (0.6 + 0.4 * gr) * sen * (1.0 - 0.35 * sickf)
+            // two-legged runners are faster; plates are heavy
+            * (1.0 + 0.15 * c.g.v[STANCE]) * (1.0 - 0.1 * c.g.v[PLATES]);
         // swimming: fins make the speed; bodies glide on their momentum and turn slowly
         let wet = self.terr[idx] == 1 && c.z <= 0.5;
         let fins = c.g.v[FINS] + if q & SWIMMER != 0 { 0.25 } else { 0.0 } + if aquatic(&c.g) { 0.2 } else { 0.0 };
@@ -2188,13 +2274,16 @@ impl Sim {
         }
         let g = &c.g;
         let v = (c.vx * c.vx + c.vy * c.vy).sqrt();
-        let d_t = (temp - g.v[TOL]).abs() - 0.15 - g.v[FUR] * (g.v[TOL] - temp).max(0.0) * 0.5;
+        // dark bodies soak up the sun, giants hold their heat; plates and sails shed it
+        let temp_b = temp + (0.5 - g.v[LUM]) * 0.08 * (1.0 - self.dark) + 0.005 * (c.s - 8.0).max(0.0);
+        let d_t = (temp_b - g.v[TOL]).abs() - 0.15 - 0.07 * g.v[PLATES] - g.v[FUR] * (g.v[TOL] - temp_b).max(0.0) * 0.5;
         let therm = if d_t > 0.0 { 1.0 + 8.0 * d_t * d_t } else { 1.0 };
         let orn = if c.male { (g.v[HORN] + g.v[TAIL]) * 0.5 } else { 0.0 };
         let mut cost = (KREST * c.m34 * g.v[METAB] + KMOVE * c.m34 * v * v + 0.0002 * g.v[VIS])
             * therm
             * (1.0 + 0.25 * orn)
-            * (1.0 + 0.12 * g.v[IMMUNE] + 0.12 * g.v[ARMOR] + 0.08 * g.v[FUR]);
+            * (1.0 + 0.12 * g.v[IMMUNE] + 0.12 * g.v[ARMOR] + 0.08 * g.v[FUR])
+            * (1.0 + 0.06 * g.v[STANCE] + 0.05 * g.v[NECK] + 0.05 * g.v[PLATES]);
         cost *= 0.2 + 0.8 * g.v[COMPLEXITY];
         if c.z > 0.5 {
             cost *= 1.8 + g.v[SIZE] * 0.08;
@@ -2223,7 +2312,9 @@ impl Sim {
                     if (c.x - px).powi(2) + (c.y - py).powi(2) < reach * reach && self.pl[o] >= 2 {
                         // A coarse step (dt>1) stands for several ticks of grazing: keep eating
                         // neighbouring plants, as the animal would have done tick by tick.
-                        let bites = 1 + (dt - 1) / 3;
+                        // big mouths take several plants per meal (each plant gives at most a fixed amount)
+                        let mouthful = ((0.1 + 1.8 * c.m34) / 3.0).ceil().max(1.0) as i32;
+                        let bites = ((1 + (dt - 1) / 3) * mouthful).min(16);
                         let mut cell = Some(o);
                         let mut n = 0;
                         while let Some(o) = cell {
@@ -2293,10 +2384,16 @@ impl Sim {
                                 let pack = self.pack_mates(c, 14.0).min(3) as f32;
                                 let o = &self.crs[oj];
                                 let mut pk = 0.48 + 0.3 * (c.s / o.s - 0.9) + 0.08 * pack;
-                                pk *= 1.0 - 0.45 * o.g.v[ARMOR];
+                                // armor works on four legs; plates, horns and long necks change the odds; upright hunters grab
+                                pk *= 1.0 - 0.45 * o.g.v[ARMOR] * (1.0 - 0.6 * o.g.v[STANCE]);
+                                pk *= (1.0 - 0.15 * o.g.v[PLATES]) * (1.0 - 0.2 * o.g.v[HORN]);
+                                pk += 0.06 * o.g.v[NECK] + 0.08 * c.g.v[STANCE];
                                 if o.g.has(THICK_HIDE) {
                                     pk *= 0.55;
                                 }
+                                // horns and tail clubs hurt a predator that fails
+                                let wound = (0.03 * o.g.v[HORN] + if o.g.v[ARMOR] > 0.6 && o.g.v[TAIL] > 0.6 { 0.04 } else { 0.0 })
+                                    * (o.s / c.s).min(2.0);
                                 if self.rr() < pk {
                                     let o = &self.crs[oj];
                                     // first bites now; the rest of the carcass is eaten over the next ticks
@@ -2326,7 +2423,7 @@ impl Sim {
                                     for &kid in c.kids.iter() {
                                         if let Some(&kj) = self.idmap.get(&kid) {
                                             let k = &mut self.crs[kj];
-                                            if !k.dead && k.age < k.g.v[MAT] && (k.x - c.x).powi(2) + (k.y - c.y).powi(2) < 900.0 {
+                                            if !k.dead && k.age < mat_age(&k.g) && (k.x - c.x).powi(2) + (k.y - c.y).powi(2) < 900.0 {
                                                 k.e = (k.e + share).min(k.max_e);
                                             }
                                         }
@@ -2338,6 +2435,8 @@ impl Sim {
                                     } else {
                                         c.tgt = None;
                                     }
+                                } else if wound > 0.0 {
+                                    c.e -= wound * c.max_e;
                                 }
                             }
                         }
@@ -2348,7 +2447,8 @@ impl Sim {
                         let o = &self.crs[oj];
                         if !o.dead && o.preg.is_none() && (c.x - o.x).powi(2) + (c.y - o.y).powi(2) < ((c.s + o.s) * 0.5 + 2.0).powi(2) {
                             if c.cool <= 0 && o.cool <= 0 {
-                                let ornm = (c.g.v[HORN] + c.g.v[TAIL]) * 0.5;
+                                // ornaments: horns, tails, plates and bright colours win mates
+                                let ornm = ((c.g.v[HORN] + c.g.v[TAIL]) * 0.5 + 0.3 * c.warn + 0.2 * c.g.v[PLATES]).min(1.0);
                                 let (choosy, pro, litter, care) = (o.g.v[CHOOSY], o.g.has(PROLIFIC), o.g.v[LITTER], o.g.v[CARE]);
                                 if self.rr() < 0.25 + 0.75 * (1.0 - choosy * (1.0 - ornm)) {
                                     let gest = (280.0 * if pro { 0.7 } else { 1.0 } * (0.8 + 0.4 * self.rr())) as i64;
@@ -2711,7 +2811,19 @@ let __t2 = std::time::Instant::now();
         }
         self.nmicro = self.crs.iter().filter(|c| c.g.v[COMPLEXITY] < 0.42).count();
         self.nanimals = self.crs.len() - self.nmicro;
-        self.nherb = self.crs.iter().filter(|c| c.g.v[COMPLEXITY] >= 0.42 && c.g.v[DIET] < 0.45).count();
+        self.nherb = self.crs.iter().filter(|c| c.g.v[COMPLEXITY] >= 0.42 && c.g.v[DIET] <= 0.65).count();
+        {
+            let (mut vivid, mut armed) = (0.0f32, 0.0f32);
+            for c in &self.crs {
+                if c.warn > 0.3 {
+                    vivid += c.warn;
+                    if c.g.q & (VENOMOUS | SPIKY) != 0 {
+                        armed += c.warn;
+                    }
+                }
+            }
+            self.apo_trust = 0.15 + 0.75 * if vivid > 0.0 { armed / vivid } else { 0.0 };
+        }
         // perception in parallel: read-only snapshot, results applied in each creature's turn
 let __t3 = std::time::Instant::now();
         let n0 = self.crs.len();

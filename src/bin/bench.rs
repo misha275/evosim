@@ -29,6 +29,12 @@ fn main() {
             let carn = s.crs.iter().filter(|c| c.g.v[evosim::genome::DIET] > 0.65).count();
             let ce: f32 = s.crs.iter().filter(|c| c.g.v[evosim::genome::DIET] >= 0.45).map(|c| c.e / c.max_e).sum::<f32>() / (omni + carn).max(1) as f32;
             println!("   grown-land {} herb {} mean-energy {:.2} sick {} omni {} carn {} pred-energy {:.2}", gl, herb, me, s.nsick, omni, carn, ce);
+            { let mut ep: Vec<u32> = s.crs.iter().map(|c| c.g.epoch).collect(); ep.sort(); let q = |f: f32| ep.get((ep.len() as f32 * f) as usize).copied().unwrap_or(0);
+              let ms = s.crs.iter().map(|c| c.g.v[evosim::genome::SIZE]).fold(0f32, f32::max);
+              let avg = |k: usize| s.crs.iter().map(|c| c.g.v[k]).sum::<f32>() / s.crs.len().max(1) as f32;
+              println!("   epoch med {} p90 {} max {} | size mean {:.1} max {:.1} | {}", q(0.5), q(0.9), ep.last().copied().unwrap_or(0), avg(evosim::genome::SIZE), ms, evosim::genome::EXTRA_REPORT.iter().map(|&(n,k)| format!("{}={:.2}", n, avg(k))).collect::<Vec<_>>().join(" ")); }
+            { let cons: f32 = s.crs.iter().map(|c| c.consp).sum::<f32>() / s.crs.len().max(1) as f32;
+              println!("   conspicuousness {:.2} warning-colour trust {:.2}", cons, s.apo_trust); }
             println!("t {} pop {} plants {} land {} crowd {:.2} species {}/{} lineages {} tps {:.0}", s.t, s.crs.len(), s.nplants, s.land, s.crowd, s.alive_species(), s.species.len(), s.vegetation.lineages.len(), s.t as f32 / t0.elapsed().as_secs_f32());
         }
     }

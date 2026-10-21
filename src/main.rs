@@ -340,8 +340,11 @@ fn draw_pixels(px: &[[u8; 4]], pw: i32, ph: i32, x: f32, y: f32, k: f32) {
 }
 
 fn draw_portrait(cr: &Cr, t: i64, dark: f32, x: f32, y: f32, k: f32) {
-    let px = portrait(cr, t, dark, 20, 16);
-    draw_pixels(&px, 20, 16, x, y, k);
+    // giants get a bigger canvas drawn at a smaller scale, so the portrait keeps its size on screen
+    let m = ((cr.s * 2.6 + 8.0) / 20.0).max(1.0);
+    let (pw, ph) = ((20.0 * m) as i32, (16.0 * m) as i32);
+    let px = portrait(cr, t, dark, pw, ph);
+    draw_pixels(&px, pw, ph, x, y, k / m);
 }
 
 fn quirk_list(q: u16, x0: f32, mut y: f32, w: f32) -> f32 {
@@ -389,7 +392,7 @@ fn draw_inspector(s: &Sim, cr: Option<&Cr>, dead: bool, x: f32, y: f32, w: f32) 
     txt(&cr.nm, tx, y, FB, sp.col);
     txt(&format!("{}  gen {}  {}", sp.name, cr.gen, if dead { "[dead]" } else { "" }), tx, y + 18.0, FS, DIM);
     let preg = cr.preg.as_ref().map_or(String::new(), |p| format!("  PREGNANT x{}", p.1.len()));
-    txt(&format!("{} {}{}", if cr.male { "male" } else { "female" }, if cr.age >= g.v[MAT] { "adult" } else { "juvenile" }, preg), tx, y + 31.0, FS, FG);
+    txt(&format!("{} {}{}", if cr.male { "male" } else { "female" }, if cr.age >= mat_age(g) { "adult" } else { "juvenile" }, preg), tx, y + 31.0, FS, FG);
     let mass = if mass_g < 1000.0 { format!("{:.0} g", mass_g) } else { format!("{:.2} kg", mass_g / 1000.0) };
     txt(&format!("{:.1} cm  {}  {:.0} cm/s", cr.s * CELL_CM, mass, g.v[SPD] * CELL_CM / TICK_S), tx, y + 44.0, FS, FG);
     txt(&format!("age {:.1}/{:.1} d  hetero {:.2}", cr.age / DAY as f32, g.v[LIFE] / DAY as f32, cr.het), tx, y + 57.0, FS, DIM);
@@ -986,7 +989,9 @@ fn draw_main(app: &mut App, s: &Sim, recompose: bool) {
         let temp = s.atmosphere.temperature(&s.tmp, s.d_t, s.w, (cr.y as usize).min(s.h - 1) * s.w + (cr.x as usize).min(s.w - 1)) * 60.0 - 20.0;
         let status = cr.sick.map_or("healthy".to_string(), |(st, _)| s.strains[st as usize].name.clone());
         txt(&format!("{} | {:.1} C | {} | corpse digestion {:.0}%", cr.nm, temp, status, cr.g.v[SCAVENGE] * 100.0), 16.0, 62.0, FS, WHITE_C);
-        txt(&format!("{} | {} | oxygen {:.0}%", stage(&cr.g), habitat(&cr.g), cr.breath * 100.0), 16.0, 77.0, FS, WHITE_C);
+        let camo = if cr.consp < 0.55 { "well hidden" } else if cr.consp < 0.85 { "blends in" } else { "stands out" };
+        let warn = if cr.warn > 0.5 { " | warning colours" } else { "" };
+        txt(&format!("{} | {} | oxygen {:.0}% | {}{}", body_plan(&cr.g), habitat(&cr.g), cr.breath * 100.0, camo, warn), 16.0, 77.0, FS, WHITE_C);
         txt(&format!("immune {:.0}% | burial {:.0}% | wings {:.0}% | fins {:.0}%", cr.g.v[IMMUNE] * 100.0, cr.g.v[BURIAL] * 100.0, cr.g.v[WINGS] * 100.0, cr.g.v[FINS] * 100.0), 16.0, 92.0, FS, DIM);
     }
     txt(
