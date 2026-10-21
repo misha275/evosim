@@ -1,3 +1,4 @@
+/target
+/saves
+*.png
 __pycache__/
-saves/
-evosim.png
