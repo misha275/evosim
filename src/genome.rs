@@ -370,6 +370,17 @@ pub fn trait_note(g: &Genome, rf: &Genome) -> String {
     }
 }
 
+/// How well a diet extracts energy from plants / from meat. Specialists do well; a middle diet
+/// (omnivory) gets little from either, so it is a fitness valley that is hard to cross.
+#[inline]
+pub fn plant_eff(diet: f32) -> f32 {
+    (1.0 - diet).clamp(0.0, 1.0).powf(2.2)
+}
+#[inline]
+pub fn meat_eff(diet: f32) -> f32 {
+    diet.clamp(0.0, 1.0).powf(2.2)
+}
+
 pub fn heterozygosity(h1: &Genome, h2: &Genome) -> f32 {
     DK.iter().map(|&k| (h1.v[k] - h2.v[k]).abs() / (RANGE[k].1 - RANGE[k].0)).sum::<f32>() / DK.len() as f32
 }

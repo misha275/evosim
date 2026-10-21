@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.5.0
+- Microbial colonies have their own population limit (60% of the animal limit), independent of animals, and are drawn
+  dimmer and half-transparent. The animal sandbox starts without colonies; primordial worlds keep them as the origin of life.
+- Swimming: speed comes from fins, bodies glide on momentum and turn slowly. Swimmers are drawn without legs or shadow,
+  half under the surface, with ripples, a wake and a gentle bob.
+- Shorelines are barriers: amphibious animals cross between open water and land only with effort (energy cost, failed
+  attempts turn them back) and stay out of the deep sea; aquatic animals never leave the water.
+- Diet: plant and meat digestion follow steep curves, so omnivores digest both poorly and omnivory is hard to evolve.
+- Predators: bigger carcass yields, pack-hunting bonus, kits fed from kills, sated predators rest instead of killing,
+  herbivores can't take the slots reserved for predators (they keep ≤80% of the population limit).
+- Predator look: long low body, dark dorsal stripe, pointed ears, fangs and claws. Hunting animations: gallop with dust
+  while chasing, leap at the pounce, head down while feeding, speed lines while fleeing; blood at kills, dust clouds.
+- `cargo run --release --example critters` renders the poses to critters.png.
+
 ## 2.4.0
 - Microbial colonies are drawn 2x1 (small, horizontal) up to 2x2 (large); colonial life shows a second cell type.
 - Fix: in primordial worlds the colonies filled the population limit within ~1000 ticks (free photosynthesis and

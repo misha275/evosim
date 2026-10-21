@@ -16,7 +16,9 @@ pub const CH: usize = 8;
 pub const CG: usize = 16;
 pub const CELL_CM: f32 = 10.0;
 /// nutrient pool size of a fully watery 16x16 grid cell
-const NUTRIENT_CAP: f32 = 6.0;
+const NUTRIENT_CAP: f32 = 60.0;
+/// side of a nutrient block (cells): colonies in the same block share its nutrients
+const NB: usize = 64;
 pub const TICK_S: f32 = 0.2;
 pub const MK: f32 = 0.0032;
 const KREST: f32 = 0.14;
@@ -42,6 +44,14 @@ fn prefetch<T>(p: &T) {
     }
     #[cfg(not(target_arch = "x86_64"))]
     let _ = p;
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Move {
+    Air,
+    Aquatic,
+    Amphibious,
+    Walker,
 }
 
 #[derive(Clone, Copy)]
@@ -108,6 +118,20 @@ pub struct Cr {
     pub fv: Option<(f32, f32)>,
     pub z: f32,
     pub breath: f32,
+    /// what the body is doing (for animation): 0 idle, 1 chasing prey, 2 pouncing, 3 feeding, 4 fleeing
+    #[serde(default)]
+    pub act: u8,
+    #[serde(default)]
+    pub act_until: i64,
+}
+
+/// Short-lived visual effects in the world (blood at a kill, dust of a pounce).
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Fx {
+    pub x: f32,
+    pub y: f32,
+    pub ttl: i32,
+    pub kind: u8, // 0 blood, 1 dust
 }
 
 impl Default for Genome {
@@ -124,6 +148,7 @@ impl Cr {
             dead: true, gut: VecDeque::new(), wa: 0.0, rest: false, col: [0; 3], dk: [0; 3], lt: [0; 3], c2: [0; 3],
             male: true, preg: None, nut: 0.6, pf: 1.0, mom: None, nurse: 0.0, pers: [0.5; 3], nm: String::new(), mk: 3,
             mkc: [0; 3], kids: Vec::new(), het: 0.0, sick: None, imm: Vec::new(), fv: None, z: 0.0, breath: 1.0,
+            act: 0, act_until: 0,
         }
     }
     /// A display-only creature built from a genome (phylogeny portraits).
@@ -282,6 +307,18 @@ pub struct Lin {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Sim {
     pub primordial: bool,
+    /// microbial colonies enabled
+    #[serde(default)]
+    pub microbes: bool,
+    /// colonies alive at the start of the current step (they have their own population limit)
+    #[serde(skip)]
+    pub nmicro: usize,
+    /// animals (non-colonies) alive at the start of the current step
+    #[serde(skip)]
+    pub nanimals: usize,
+    /// plant-eating animals alive (they may fill at most 80% of the limit, leaving room for predators)
+    #[serde(skip)]
+    pub nherb: usize,
     pub map_type: crate::worldgen::MapType,
     pub w: usize,
     pub h: usize,
@@ -308,6 +345,8 @@ pub struct Sim {
     pub cor: Vec<Co>,
     pub bones: Vec<Bo>,
     pub poop: Vec<Poop>,
+    #[serde(default)]
+    pub fx: Vec<Fx>,
     pub hist: VecDeque<[u32; 5]>,
     pub species: Vec<Sp>,
     pub lin: FxHashMap<u32, Lin>,
@@ -393,9 +432,20 @@ impl Sim {
     }
 
     pub fn new_with(w: usize, h: usize, primordial: bool, seed: u64, map_type: crate::worldgen::MapType) -> Sim {
+        // colonies are the origin of life in primordial worlds; the animal sandbox has none
+        Self::new_cfg(w, h, primordial, seed, map_type, primordial)
+    }
+
+    /// `microbes`: whether microbial colonies exist. Off: primordial life starts as simple aquatic
+    /// animals and bodies never simplify back into colonies.
+    pub fn new_cfg(w: usize, h: usize, primordial: bool, seed: u64, map_type: crate::worldgen::MapType, microbes: bool) -> Sim {
         let n = w * h;
         let mut s = Sim {
             primordial,
+            microbes,
+            nmicro: 0,
+            nanimals: 0,
+            nherb: 0,
             map_type,
             w,
             h,
@@ -420,6 +470,7 @@ impl Sim {
             cor: Vec::new(),
             bones: Vec::new(),
             poop: Vec::new(),
+            fx: Vec::new(),
             hist: VecDeque::new(),
             species: Vec::new(),
             lin: FxHashMap::default(),
@@ -480,9 +531,23 @@ impl Sim {
         let area = (s.land as f32 / 58000.0).max(0.3);
         s.maxpop = 120.max((1200f32.min(300.0 * s.land as f32 / 58000.0)) as usize);
         let founders: &[(Kind, usize)] =
-            if primordial { &[(Kind::Microbe, 90)] } else { &[(Kind::Herb, 70), (Kind::Omni, 6), (Kind::Carn, 3)] };
+            if primordial { &[(Kind::Microbe, 90)] } else { &[(Kind::Herb, 70), (Kind::Omni, 3), (Kind::Carn, 10)] };
         for &(kind, cnt) in founders {
-            let b = base_genome(&mut s.rng, kind);
+            let mut b = base_genome(&mut s.rng, kind);
+            if kind == Kind::Microbe && !microbes {
+                // no colonies: the first life is a small, simple, gill-breathing animal
+                b.v[COMPLEXITY] = 0.45;
+                b.v[SIZE] = 1.6;
+                b.v[SPD] = 0.5;
+                b.v[MAT] = 450.0;
+                b.v[FINS] = 0.25;
+                // r-strategists: breed early and often, live long enough to raise several broods
+                b.v[LIFE] = 6000.0;
+                b.v[LITTER] = 2.8;
+                b.v[THRESH] = 0.56;
+                b.v[CARE] = 0.25;
+                b.v[CHOOSY] = 0.1;
+            }
             let sp = s.newsp(None, b.clone(), "");
             // founders arrive in herds/colonies: a suitable spot, then companions around it
             let total = cnt.max((cnt as f32 * area.powf(0.8)) as usize);
@@ -529,7 +594,7 @@ impl Sim {
         self.cgrid = vec![Vec::new(); self.gwc * self.ghc];
         self.kgrid = vec![Vec::new(); self.gwc * self.ghc];
         self.rebuild_water_grid();
-        if self.nutrients.len() != self.gwc * self.ghc {
+        if self.nutrients.len() != self.gwater.len() {
             self.nutrients = self.gwater.iter().map(|&wf| wf * NUTRIENT_CAP).collect();
         }
         self.idmap = self.crs.iter().enumerate().map(|(i, c)| (c.id, i)).collect();
@@ -538,15 +603,34 @@ impl Sim {
         self.bg_version += 1;
     }
 
+    /// Colonies have their own population limit, independent of the animals'.
+    pub fn micro_cap(&self) -> usize {
+        if self.microbes {
+            self.maxpop * 6 / 10
+        } else {
+            0
+        }
+    }
+
+    fn nb_w(&self) -> usize {
+        self.w.div_ceil(NB)
+    }
+    #[inline]
+    fn nb_index(&self, x: f32, y: f32) -> usize {
+        let nbw = self.nb_w();
+        (y.max(0.0) as usize / NB).min(self.h.div_ceil(NB) - 1) * nbw + (x.max(0.0) as usize / NB).min(nbw - 1)
+    }
+
     fn rebuild_water_grid(&mut self) {
-        let mut g = vec![0f32; self.gwc * self.ghc];
+        let nbw = self.nb_w();
+        let mut g = vec![0f32; nbw * self.h.div_ceil(NB)];
         for i in 0..self.n {
             if self.terr[i] == 1 {
-                g[(i / self.w / CG) * self.gwc + (i % self.w) / CG] += 1.0;
+                g[(i / self.w / NB) * nbw + (i % self.w) / NB] += 1.0;
             }
         }
         for v in g.iter_mut() {
-            *v /= (CG * CG) as f32;
+            *v /= (NB * NB) as f32;
         }
         self.gwater = g;
     }
@@ -555,7 +639,7 @@ impl Sim {
     /// the population limit, so colonies are limited by food (turnover, selection) and not by the cap.
     fn nutrient_regen(&self) -> f32 {
         let water: f32 = self.gwater.iter().sum::<f32>().max(1.0);
-        self.maxpop as f32 * 0.6 * 0.012 / water
+        self.micro_cap().max(1) as f32 * 0.03 / water
     }
 
     #[inline]
@@ -788,7 +872,14 @@ impl Sim {
         &mut self, h1: Genome, h2: Genome, sp: u32, par: Option<(u32, u32)>, pos: Option<(f32, f32)>, e: Option<f32>,
         note: &str, mom: Option<u32>, g: Option<Genome>,
     ) -> Option<usize> {
+        let (mut h1, mut h2) = (h1, h2);
         let mut g = g.unwrap_or_else(|| phenotype(&mut self.rng, &h1, &h2));
+        if !self.microbes {
+            // colonies are switched off: bodies cannot simplify below the animal grade
+            for gg in [&mut g, &mut h1, &mut h2] {
+                gg.v[COMPLEXITY] = gg.v[COMPLEXITY].max(0.42);
+            }
+        }
         let male = self.rng.gen::<bool>();
         if !male {
             g.v[HORN] *= 0.35;
@@ -799,9 +890,14 @@ impl Sim {
             None => {
                 let mut i: Option<usize> = None;
                 let aq = aquatic(&g);
-                for _ in 0..400 {
+                for _ in 0..2000 {
                     let j = self.rng.gen_range(0..self.n);
-                    let okk = if aq { self.terr[j] == 1 } else { self.terr[j] == 0 && self.fert[j] > 0.3 };
+                    // water life starts in shallow seas (not in a pond it could never leave)
+                    let okk = if aq {
+                        self.terr[j] == 1 && self.biome[j] == crate::worldgen::Biome::Ocean as u8 && self.elevation[j] >= crate::worldgen::SEA - 6
+                    } else {
+                        self.terr[j] == 0 && self.fert[j] > 0.3
+                    };
                     if okk {
                         i = Some(j);
                         if (self.tmp[j] as f32 / 255.0 - g.v[TOL]).abs() < 0.14 {
@@ -844,7 +940,7 @@ impl Sim {
             gen: par.map_or(0, |p| p.1 + 1), sp, tgt: None, thr: None, dead: false, gut: VecDeque::new(), wa, rest: false,
             col: hsv(hh, sat, val), dk: hsv(hh, 70.0, 50.0), lt: hsv(hh, 30.0, 100.0), c2: hsv(g.hue2, 62.0, 92.0), male,
             preg: None, nut, pf, mom, nurse: if mom.is_some() { 150.0 + 500.0 * g.v[CARE] } else { 0.0 }, pers, nm, mk,
-            mkc, kids: Vec::new(), het, sick: None, imm: Vec::new(), fv: None, z: 0.0, breath: 1.0,
+            mkc, kids: Vec::new(), het, sick: None, imm: Vec::new(), fv: None, z: 0.0, breath: 1.0, act: 0, act_until: 0,
             hap: Box::new((h1, h2)), g,
         };
         let spp = &mut self.species[sp as usize];
@@ -852,6 +948,14 @@ impl Sim {
         spp.peak = spp.peak.max(spp.pop);
         spp.died = None;
         self.lin.insert(id, Lin { par: par.map_or(0, |p| p.0), gen: c.gen, sp, note: note.into(), born: self.t });
+        if c.g.v[COMPLEXITY] < 0.42 {
+            self.nmicro += 1;
+        } else {
+            self.nanimals += 1;
+            if c.g.v[DIET] < 0.45 {
+                self.nherb += 1;
+            }
+        }
         self.crs.push(c);
         let idx = self.crs.len() - 1;
         self.idmap.insert(id, idx);
@@ -881,7 +985,8 @@ impl Sim {
     fn deliver(&mut self, mom: &mut Cr, sperm: Vec<(Genome, String)>) {
         let e0 = (0.10 + 0.25 * mom.g.v[CARE]) * mom.max_e;
         for (hd, nd) in sperm {
-            if self.crs.len() >= self.maxpop {
+            // the population limit counts animals only; colonies have their own
+            if self.nanimals >= self.maxpop || (mom.g.v[DIET] < 0.45 && self.nherb >= self.maxpop * 8 / 10) {
                 break;
             }
             let (hm, nm_) = gamete(&mut self.rng, &mom.hap.0, &mom.hap.1);
@@ -889,7 +994,8 @@ impl Sim {
             let sp = self.classify(&g, mom.sp);
             let note = if nm_.is_empty() { nd } else { nm_ };
             let (mut cx, mut cy) = (mom.x + self.rng.gen_range(-2.0..2.0), mom.y + self.rng.gen_range(-2.0..2.0));
-            if !self.ok(cx, cy, can_swim(&g)) {
+            let mode = if aquatic(&g) { Move::Aquatic } else if can_swim(&g) { Move::Amphibious } else { Move::Walker };
+            if !self.can_enter(mom.x, mom.y, cx, cy, mode, true) {
                 cx = mom.x;
                 cy = mom.y;
             }
@@ -1646,7 +1752,8 @@ impl Sim {
                 let diet = g.v[DIET];
                 if hunger < 0.92 {
                     if let Some(p) = prey {
-                        if hunger < 0.3 + 0.6 * aggr {
+                        // satiation: a fed predator rests instead of killing (keeps predator and prey in balance)
+                        if hunger < 0.25 + 0.3 * aggr {
                             tg = Some(Tgt::Prey(p));
                         }
                     }
@@ -1696,6 +1803,39 @@ impl Sim {
         }
     }
 
+    /// Open water = lake or sea (rivers are fords).
+    #[inline]
+    fn is_open_water(&self, x: f32, y: f32) -> bool {
+        let i = y as usize * self.w + x as usize;
+        self.terr[i] == 1 && self.biome.get(i) != Some(&(crate::worldgen::Biome::River as u8))
+    }
+
+    /// Can a body moving in `mode` step from (fx,fy) to (x,y)? Shorelines are barriers: amphibious
+    /// animals cross them only on a successful `climb` roll, stay out of deep sea, and aquatic ones
+    /// never leave the water.
+    fn can_enter(&self, fx: f32, fy: f32, x: f32, y: f32, mode: Move, climb: bool) -> bool {
+        if x < 1.0 || y < 1.0 || x >= (self.w - 1) as f32 || y >= (self.h - 1) as f32 {
+            return false;
+        }
+        let i = y as usize * self.w + x as usize;
+        let t = self.terr[i];
+        match mode {
+            Move::Air => true,
+            Move::Aquatic => t == 1,
+            Move::Walker => self.ok(x, y, false),
+            Move::Amphibious => {
+                if t == 2 {
+                    return false;
+                }
+                let to_wet = self.is_open_water(x, y);
+                if to_wet && self.elevation[i] < crate::worldgen::SEA - 6 {
+                    return false; // deep sea needs gills
+                }
+                to_wet == self.is_open_water(fx, fy) || climb
+            }
+        }
+    }
+
     #[inline]
     pub fn ok(&self, x: f32, y: f32, sw: bool) -> bool {
         if x < 1.0 || y < 1.0 || x >= (self.w - 1) as f32 || y >= (self.h - 1) as f32 {
@@ -1729,7 +1869,7 @@ impl Sim {
         let pg = &plant.g;
         // a meal scales with the eater: a microscopic colony gets only a nibble
         let mouth = if c.g.v[COMPLEXITY] < 0.42 { (c.s / 2.0).clamp(0.05, 1.0) } else { 1.0 };
-        c.e += (1.0 - 0.6 * pg[veg::DEFENSE]) * (1.0 - 0.7 * pg[veg::TOXIN]) * self.pl[o] as f32 * 2.2 * (1.0 - c.g.v[DIET] * 1.4).max(0.05) * (0.6 + 0.8 * c.m34) * glut * mouth;
+        c.e += (1.0 - 0.6 * pg[veg::DEFENSE]) * (1.0 - 0.7 * pg[veg::TOXIN]) * self.pl[o] as f32 * 2.2 * plant_eff(c.g.v[DIET]) * 1.05 * (0.6 + 0.8 * c.m34) * glut * mouth;
         // poison hurts unless the immune system copes; thorns hurt unless armored
         c.e -= pg[veg::TOXIN] * 10.0 * (1.0 - 0.8 * c.g.v[IMMUNE]);
         c.e -= pg[veg::THORNS] * 6.0 * (1.0 - 0.8 * c.g.v[ARMOR]);
@@ -1761,6 +1901,23 @@ impl Sim {
         None
     }
 
+    /// Kin predators within `r` cells (pack members).
+    fn pack_mates(&self, c: &Cr, r: f32) -> usize {
+        let (gx0, gx1, gy0, gy1) = self.grid_range(c.x, c.y, r);
+        let mut n = 0;
+        for gy in gy0..=gy1 {
+            for gx in gx0..=gx1 {
+                for &j in &self.cgrid[gy * self.gwc + gx] {
+                    let o = &self.crs[j as usize];
+                    if o.id != c.id && !o.dead && o.sp == c.sp && (o.x - c.x).powi(2) + (o.y - c.y).powi(2) < r * r {
+                        n += 1;
+                    }
+                }
+            }
+        }
+        n
+    }
+
     fn live(&mut self, ci: usize, look: Option<(Option<u32>, Option<Tgt>)>) {
         let mut c = std::mem::replace(&mut self.crs[ci], Cr::placeholder());
         self.live_inner(&mut c, look);
@@ -1784,7 +1941,9 @@ impl Sim {
         if c.cool > 0 {
             c.cool -= dt;
         }
-        if c.g.v[COMPLEXITY] < 0.42 && c.age >= c.g.v[MAT] && c.cool <= 0 && c.e > 0.75 * c.max_e && self.crs.len() < self.maxpop {
+        // colonies divide only while they stay under their own share of the population limit,
+        // so they cannot crowd animals out
+        if c.g.v[COMPLEXITY] < 0.42 && c.age >= c.g.v[MAT] && c.cool <= 0 && c.e > 0.75 * c.max_e && self.nmicro < self.micro_cap() {
             let (h1, _) = gamete(&mut self.rng, &c.hap.0, &c.hap.1);
             let (h2, note) = gamete(&mut self.rng, &c.hap.0, &c.hap.1);
             let child_g = phenotype(&mut self.rng, &h1, &h2);
@@ -1854,7 +2013,10 @@ impl Sim {
                 uy = dy / d;
                 mul = match tg {
                     Tgt::Plant(_) => 0.8,
-                    Tgt::Prey(_) => 1.1,
+                    Tgt::Prey(_) => {
+                        // stalk from afar, sprint when close
+                        if (tx - x).powi(2) + (ty - y).powi(2) < 144.0 { 1.45 } else { 0.85 }
+                    }
                     Tgt::Corpse(_) => 0.9,
                     Tgt::Mate(_) => 0.9,
                     Tgt::Herd(..) => 0.6,
@@ -1919,9 +2081,22 @@ impl Sim {
                 mul = 0.0;
             }
         }
+        if t >= c.act_until {
+            c.act = match c.tgt {
+                Some(Tgt::Prey(_)) => 1,
+                _ if c.thr.is_some() => 4,
+                _ => 0,
+            };
+        }
         let sen = 1.0 - 0.4 * ((c.age / c.g.v[LIFE] - 0.7) / 0.3).max(0.0);
-        let sp = c.g.v[SPD] * mul * (0.6 + 0.4 * gr) * sen * (1.0 - 0.35 * sickf);
-        let inertia = 0.6f32.powi(dt);
+        let mut sp = c.g.v[SPD] * mul * (0.6 + 0.4 * gr) * sen * (1.0 - 0.35 * sickf);
+        // swimming: fins make the speed; bodies glide on their momentum and turn slowly
+        let wet = self.terr[idx] == 1 && c.z <= 0.5;
+        let fins = c.g.v[FINS] + if q & SWIMMER != 0 { 0.25 } else { 0.0 } + if aquatic(&c.g) { 0.2 } else { 0.0 };
+        if wet {
+            sp *= (0.3 + 0.9 * fins).min(1.25);
+        }
+        let inertia = if wet { 0.82f32 } else { 0.6 }.powi(dt);
         c.vx = c.vx * inertia + ux * sp * (1.0 - inertia);
         c.vy = c.vy * inertia + uy * sp * (1.0 - inertia);
         let sw = can_swim(&c.g);
@@ -1933,25 +2108,51 @@ impl Sim {
             c.vy *= 1.15;
         }
         let (mut nx, mut ny) = (x, y);
-        let air = c.z > 0.5;
-        let (wf, hf) = ((self.w - 1) as f32, (self.h - 1) as f32);
-        let allowed = |s: &Sim, xx: f32, yy: f32| if air { xx >= 1.0 && xx < wf && yy >= 1.0 && yy < hf } else { s.ok(xx, yy, sw) };
+        let mode = if c.z > 0.5 {
+            Move::Air
+        } else if aquatic(&c.g) {
+            Move::Aquatic
+        } else if sw {
+            Move::Amphibious
+        } else {
+            Move::Walker
+        };
+        let mut crossed = false;
         for _ in 0..dt {
+            // hauling out of / slipping into the water takes several attempts at the shoreline
+            let climb = self.rr() < 0.3;
             let (tx, ty) = (nx + c.vx, ny + c.vy);
-            if allowed(self, tx, ty) {
-                nx = tx;
-                ny = ty;
-            } else if allowed(self, tx, ny) {
-                nx = tx;
-            } else if allowed(self, nx, ty) {
-                ny = ty;
+            let step = if self.can_enter(nx, ny, tx, ty, mode, climb) {
+                Some((tx, ty))
+            } else if self.can_enter(nx, ny, tx, ny, mode, climb) {
+                Some((tx, ny))
+            } else if self.can_enter(nx, ny, nx, ty, mode, climb) {
+                Some((nx, ty))
             } else {
-                c.wa = self.rr() * 6.28;
-                c.tgt = None;
-                c.vx = 0.0;
-                c.vy = 0.0;
-                break;
+                None
+            };
+            match step {
+                Some((ax, ay)) => {
+                    if self.is_open_water(nx, ny) != self.is_open_water(ax, ay) {
+                        crossed = true;
+                    }
+                    nx = ax;
+                    ny = ay;
+                }
+                None => {
+                    // pressed against the shore: lose momentum, maybe give up this target
+                    c.vx *= 0.3;
+                    c.vy *= 0.3;
+                    if self.rr() < 0.35 {
+                        c.wa = self.rr() * 6.28;
+                        c.tgt = None;
+                    }
+                    break;
+                }
             }
+        }
+        if crossed {
+            c.e -= 0.004 * c.max_e;
         }
         c.x = nx;
         c.y = ny;
@@ -1973,7 +2174,7 @@ impl Sim {
         if c.g.v[COMPLEXITY] < 0.42 && in_water {
             // photosynthesis / filter feeding draws on the local nutrient pool, shared with neighbours
             let want = 0.035 * dtf * (1.0 - self.dark) * (0.4 + self.moisture[idx] as f32 / 255.0);
-            let gi = (c.y as usize / CG).min(self.ghc - 1) * self.gwc + (c.x as usize / CG).min(self.gwc - 1);
+            let gi = self.nb_index(c.x, c.y);
             if let Some(pool) = self.nutrients.get_mut(gi) {
                 let take = want.min(*pool);
                 *pool -= take;
@@ -2052,7 +2253,9 @@ impl Sim {
                         let k = &self.cor[ki];
                         if !k.dead && !k.buried && (c.x - k.x).powi(2) + (c.y - k.y).powi(2) < reach * reach {
                             let bite = k.e.min(8.0 + 24.0 * c.m34);
-                            let eff = if q & SCAVENGER != 0 { 1.0 } else { 0.35 + 0.65 * c.g.v[SCAVENGE] };
+                            let eff = (if q & SCAVENGER != 0 { 1.0 } else { 0.35 + 0.65 * c.g.v[SCAVENGE] }).max(meat_eff(c.g.v[DIET]) * 1.1);
+                            c.act = 3;
+                            c.act_until = t + 12;
                             c.e += bite * eff * glut;
                             let inf = k.inf;
                             self.cor[ki].e -= bite;
@@ -2082,15 +2285,23 @@ impl Sim {
                                 }
                             }
                             if alive {
+                                c.act = 2;
+                                c.act_until = t + 6;
+                                let (ox, oy) = (self.crs[oj].x, self.crs[oj].y);
+                                self.fx.push(Fx { x: (c.x + ox) / 2.0, y: (c.y + oy) / 2.0 + 1.0, ttl: 12, kind: 1 });
+                                // pack hunting: kin predators close by cut off the escape
+                                let pack = self.pack_mates(c, 14.0).min(3) as f32;
                                 let o = &self.crs[oj];
-                                let mut pk = 0.38 + 0.3 * (c.s / o.s - 0.9);
+                                let mut pk = 0.48 + 0.3 * (c.s / o.s - 0.9) + 0.08 * pack;
                                 pk *= 1.0 - 0.45 * o.g.v[ARMOR];
                                 if o.g.has(THICK_HIDE) {
                                     pk *= 0.55;
                                 }
                                 if self.rr() < pk {
                                     let o = &self.crs[oj];
-                                    c.e += (o.e * 0.6 + o.s * 10.0) * (0.3 + 0.7 * c.g.v[DIET]) * glut; // the whole carcass, not just its fat
+                                    // first bites now; the rest of the carcass is eaten over the next ticks
+                                    c.e += (o.e * 0.45 + o.s * 6.0) * meat_eff(c.g.v[DIET]) * 1.15 * glut;
+                                    let (kx, ky, ks) = (o.x, o.y, o.s);
                                     let osick = o.sick.map(|s| s.0);
                                     let venom = o.g.has(VENOMOUS);
                                     if let Some(st) = osick {
@@ -2106,7 +2317,27 @@ impl Sim {
                                         }
                                     }
                                     self.kill_idx(oj, true);
-                                    c.tgt = None;
+                                    for _ in 0..3 {
+                                        let (jx, jy) = (self.rng.gen_range(-1.5..1.5), self.rng.gen_range(-1.0..1.0));
+                                        self.fx.push(Fx { x: kx + jx, y: ky + jy, ttl: 260, kind: 0 });
+                                    }
+                                    // parents bring meat to their young (juvenile hunters are too small to catch prey)
+                                    let share = (ks * 6.0 * meat_eff(c.g.v[DIET])).max(4.0);
+                                    for &kid in c.kids.iter() {
+                                        if let Some(&kj) = self.idmap.get(&kid) {
+                                            let k = &mut self.crs[kj];
+                                            if !k.dead && k.age < k.g.v[MAT] && (k.x - c.x).powi(2) + (k.y - c.y).powi(2) < 900.0 {
+                                                k.e = (k.e + share).min(k.max_e);
+                                            }
+                                        }
+                                    }
+                                    // the carcass keeps the meat: stay and feed on it
+                                    if let Some(k) = self.cor.last_mut() {
+                                        k.e += ks * 15.0;
+                                        c.tgt = Some(Tgt::Corpse(k.id));
+                                    } else {
+                                        c.tgt = None;
+                                    }
                                 }
                             }
                         }
@@ -2394,6 +2625,10 @@ let __t0 = std::time::Instant::now();
             self.next_outbreak = t + self.rng.gen_range(DAY..=DAY * 3);
         }
         self.flash *= 0.88f32.powi(dt);
+        for f in self.fx.iter_mut() {
+            f.ttl -= dt;
+        }
+        self.fx.retain(|f| f.ttl > 0);
         if let Some(b) = &mut self.bolt {
             b.2 -= dt;
             if b.2 <= 0 {
@@ -2474,6 +2709,9 @@ let __t2 = std::time::Instant::now();
             let gi = (k.y as usize / CG).min(self.ghc - 1) * self.gwc + (k.x as usize / CG).min(self.gwc - 1);
             self.kgrid[gi].push(j as u32);
         }
+        self.nmicro = self.crs.iter().filter(|c| c.g.v[COMPLEXITY] < 0.42).count();
+        self.nanimals = self.crs.len() - self.nmicro;
+        self.nherb = self.crs.iter().filter(|c| c.g.v[COMPLEXITY] >= 0.42 && c.g.v[DIET] < 0.45).count();
         // perception in parallel: read-only snapshot, results applied in each creature's turn
 let __t3 = std::time::Instant::now();
         let n0 = self.crs.len();

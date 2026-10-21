@@ -132,7 +132,13 @@ Forests, conifers, palms and cacti need time: run a world for ~1 million ticks (
   hover/click to pin, `Enter` jumps to a living member, `E` extinct, `M` minor branches, `Esc` close.
 
 Primordial worlds contain microbial colonies and photosynthetic biofilms/algae; every later animal must descend from
-those colonies. Extinction ends that world's living lineages until you restart.
+those colonies. Colonies have their own population limit (independent of animals) and are drawn dimmed; the animal
+sandbox has none.
+
+Predators and herbivores: digestion of plants and meat follows steep curves, so specialists do well and omnivores are rare.
+Predators hunt in packs, feed their young from kills and rest when sated; they have their own look (long low body,
+dorsal stripe, fangs, claws) and hunting animations (gallop, pounce, feeding, blood). Swimmers float half-submerged with
+ripples and a wake; shorelines and deep sea are real barriers. `cargo run --release --example critters` renders the poses. Extinction ends that world's living lineages until you restart.
 
 ## Verification
 

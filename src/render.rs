@@ -479,35 +479,83 @@ pub fn plant_sprite(p: &PlantLineage, growth: u8, phase: u8) -> Sprite {
 }
 
 // ---------------------------------------------------------------- creature sprites
-pub fn draw_cr(cv: &mut Canvas, c: &Cr, t: i64, dark: f32, cx: f32, cy: f32) {
+pub fn draw_cr(cv: &mut Canvas, c: &Cr, t: i64, dark: f32, cx: f32, cy: f32, wet: bool) {
     let g = &c.g;
     let f = c.f as i32;
     if g.v[COMPLEXITY] < 0.42 {
         // microbial colonies: 2x1 (horizontal) when small, 2x2 when grown large
+        // drawn half-transparent and desaturated so colonies don't steal attention from animals
         let (x, y) = (cx as i32, cy as i32);
         let tall = c.s >= 0.3;
-        cv.fill(x, y, 2, if tall { 2 } else { 1 }, c.col);
-        cv.set(x, y, c.lt);
+        let dim = |col: Col| -> Col {
+            let l = (col[0] as u32 + col[1] as u32 + col[2] as u32) / 3;
+            [((col[0] as u32 + l) / 2) as u8, ((col[1] as u32 + l) / 2) as u8, ((col[2] as u32 + l) / 2) as u8]
+        };
+        cv.blend(x, y, 2, if tall { 2 } else { 1 }, dim(c.col), 120);
+        cv.blend(x, y, 1, 1, dim(c.lt), 90);
         if tall && g.v[COMPLEXITY] >= 0.22 {
-            cv.set(x + 1, y + 1, c.c2); // colonial life: a second cell type
+            cv.blend(x + 1, y + 1, 1, 1, dim(c.c2), 110); // colonial life: a second cell type
         }
         return;
     }
-    let cy = cy - c.z;
+    // swimmers bob gently on the surface instead of standing on it
+    let cy = cy - c.z + if wet && ((t / 9 + c.id as i64) & 3) == 0 { 1.0 } else { 0.0 };
     let gr = (c.age / g.v[MAT]).min(1.0);
     let juv = gr < 1.0;
-    let w = 4.max((c.s * 0.8).round() as i32);
-    let h = 3.max((w as f32 * g.v[BODY]).round() as i32) + (g.has(GLUTTON) && w >= 4) as i32;
+    let carn = g.v[DIET] > 0.6;
+    // predators: long, low bodies
+    let w = 4.max((c.s * 0.8).round() as i32) + carn as i32;
+    let h = 3.max((w as f32 * g.v[BODY] * if carn { 0.8 } else { 1.0 }).round() as i32) + (g.has(GLUTTON) && w >= 4) as i32;
     let legl = 1 + (g.v[LEGS] > 0.7) as i32;
     let x0 = cx as i32 - w / 2;
-    let y0 = cy as i32 - (h + legl) / 2;
+    let pounce = c.act == 2 && !wet;
+    let y0 = cy as i32 - (h + legl) / 2 - pounce as i32;
     let (col, dk, lt, c2) = (c.col, c.dk, c.lt, c.c2);
     let moving = c.vx.abs() + c.vy.abs() > 0.08;
-    let ph = if moving { ((t / 4) & 1) as i32 } else { 0 };
-    cv.blend(x0, y0 + h + legl, w, 1, [0, 0, 0], 80);
-    let lc = if g.has(SWIMMER) { [60, 200, 220] } else { dk };
-    cv.fill(x0 + 1 + ph, y0 + h, 1, legl, lc);
-    cv.fill(x0 + w - 2 - ph, y0 + h, 1, legl, lc);
+    let fast = c.act == 1 || c.act == 4;
+    let ph = if moving { ((t / if fast { 2 } else { 4 }) & 1) as i32 } else { 0 };
+    if wet {
+        // ripples around the body and a wake trailing behind
+        let rc = [170, 215, 235];
+        cv.blend(x0 - 1, y0 + h, w + 2, 1, rc, 150);
+        if moving {
+            let (bx, by) = (cx - c.vx.signum() * (w as f32 * 0.5 + 1.0), (y0 + h) as f32);
+            for k in 1..4 {
+                let wx = bx as i32 - (c.vx.signum() as i32) * k;
+                cv.blend(wx, by as i32 - (k & 1), 1, 1, rc, (170 - k * 40) as u8);
+                cv.blend(wx, by as i32 + (k & 1), 1, 1, rc, (130 - k * 30) as u8);
+            }
+        }
+    } else {
+        cv.blend(x0, y0 + h + legl + pounce as i32, w, 1, [0, 0, 0], 80);
+        let lc = if g.has(SWIMMER) { [60, 200, 220] } else { dk };
+        if pounce {
+            // leaping: front legs reach forward, hind legs push back
+            cv.fill(if f > 0 { x0 + w } else { x0 - 1 }, y0 + h - 1, 1, 1, lc);
+            cv.fill(if f > 0 { x0 - 1 } else { x0 + w }, y0 + h, 1, 1, lc);
+        } else if c.act == 1 && moving {
+            // galloping: legs stretched out front and back
+            let s = 1 - ph;
+            cv.fill(x0 + s, y0 + h, 1, legl, lc);
+            cv.fill(x0 + w - 1 - s, y0 + h, 1, legl, lc);
+            if ph == 1 {
+                cv.blend(if f > 0 { x0 - 2 } else { x0 + w + 1 }, y0 + h + legl - 1, 1, 1, [190, 170, 130], 140);
+            }
+        } else {
+            cv.fill(x0 + 1 + ph, y0 + h, 1, legl, lc);
+            cv.fill(x0 + w - 2 - ph, y0 + h, 1, legl, lc);
+        }
+        if carn && w >= 5 && !pounce {
+            // claws
+            cv.set(x0 + 1 + ph + f.max(0), y0 + h + legl - 1, [235, 230, 210]);
+        }
+    }
+    if c.act == 4 && moving && !wet {
+        // fleeing: speed lines
+        let bx = if f > 0 { x0 - 2 } else { x0 + w + 1 };
+        cv.blend(bx, y0 + 1, 1, 1, [235, 235, 235], 150);
+        cv.blend(bx - f, y0 + h - 1, 1, 1, [235, 235, 235], 110);
+    }
     let tl = g.v[TAIL] * (0.4 + 0.6 * gr);
     if tl > 0.2 {
         let n = 1 + (tl * 3.0) as i32;
@@ -547,6 +595,10 @@ pub fn draw_cr(cv: &mut Canvas, c: &Cr, t: i64, dark: f32, cx: f32, cy: f32) {
     if g.has(THICK_HIDE) {
         cv.fill(x0 + 1, y0 + h - 1, w - 2, 1, dk);
     }
+    if carn {
+        // dark dorsal stripe
+        cv.fill(x0 + 1, y0, w - 2, 1, dk);
+    }
     if g.has(VENOMOUS) {
         cv.set(x0 + 1, y0, [110, 230, 90]);
         cv.set(x0 + w - 2, y0 + h - 1, [110, 230, 90]);
@@ -564,7 +616,7 @@ pub fn draw_cr(cv: &mut Canvas, c: &Cr, t: i64, dark: f32, cx: f32, cy: f32) {
     if w >= 5 {
         cv.set(if f > 0 { x0 + w } else { x0 - 1 }, y0 + h - 2, col);
     }
-    let ear = if g.has(SKITTISH) { g.v[EARS].max(0.75) } else { g.v[EARS] };
+    let ear = if g.has(SKITTISH) { g.v[EARS].max(0.75) } else if carn { g.v[EARS].max(0.7) } else { g.v[EARS] };
     let ax = if f > 0 { x0 + w - 2 } else { x0 + 1 };
     if ear > 0.3 {
         cv.set(ax, y0 - 1, col);
@@ -620,8 +672,21 @@ pub fn draw_cr(cv: &mut Canvas, c: &Cr, t: i64, dark: f32, cx: f32, cy: f32) {
             cv.set(ex, (y0 + h - 1).min(ey + 2), [255, 150, 170]);
         }
     }
-    if g.v[DIET] > 0.6 && w >= 5 {
+    if carn {
+        // fangs (bared while hunting)
         cv.set(hx, y0 + h - 1, WHITE);
+        if c.act == 1 || c.act == 2 {
+            cv.set(hx + f, y0 + h - 1, WHITE);
+        }
+    }
+    if c.act == 3 && !wet {
+        // feeding: head lowered to the carcass
+        let mx = if f > 0 { x0 + w } else { x0 - 1 };
+        cv.set(mx, y0 + h - 1, col);
+        cv.set(mx, y0 + h, col);
+        if ((t / 5) & 1) == 0 {
+            cv.set(mx + f, y0 + h, [150, 20, 20]);
+        }
     }
     if w >= 5 && (g.has(SCAVENGER) || g.has(HERDER)) {
         let sc = if g.has(SCAVENGER) { [190, 110, 230] } else { [120, 170, 255] };
@@ -640,6 +705,11 @@ pub fn draw_cr(cv: &mut Canvas, c: &Cr, t: i64, dark: f32, cx: f32, cy: f32) {
     if g.v[GILLS] > 0.55 {
         cv.set(if f > 0 { x0 + w - 3 } else { x0 + 2 }, y0 + 1, c.dk);
     }
+    if wet {
+        // lower half of the body under the surface
+        let sub = 1.max(h / 2);
+        cv.blend(x0 - 1, y0 + h - sub, w + 2, sub, [40, 90, 140], 120);
+    }
     if c.sick.is_some() {
         cv.set(x0 + w / 2, y0 - 4, [145, 205, 90]);
     }
@@ -657,7 +727,7 @@ pub fn draw_cr(cv: &mut Canvas, c: &Cr, t: i64, dark: f32, cx: f32, cy: f32) {
 pub fn portrait(c: &Cr, t: i64, dark: f32, pw: i32, ph: i32) -> Vec<[u8; 4]> {
     let mut px = vec![[30, 38, 34, 255]; (pw * ph) as usize];
     let mut cv = Canvas { w: pw, h: ph, px: &mut px };
-    draw_cr(&mut cv, c, t, dark, (pw / 2) as f32, (ph / 2 + 1) as f32);
+    draw_cr(&mut cv, c, t, dark, (pw / 2) as f32, (ph / 2 + 1) as f32, false);
     px
 }
 
@@ -814,7 +884,29 @@ impl WorldRenderer {
         }
         for c in &s.crs {
             if !c.dead && inside(c.x as i32, c.y as i32) {
-                draw_cr(&mut cv, c, s.t, s.dark, c.x, c.y);
+                let i = c.y as usize * s.w + c.x as usize;
+                let wet = c.z <= 0.5 && s.terr[i] == 1 && c.g.v[COMPLEXITY] >= 0.42;
+                draw_cr(&mut cv, c, s.t, s.dark, c.x, c.y, wet);
+            }
+        }
+        // short-lived effects: blood at kills, dust of a pounce
+        for fx in &s.fx {
+            let (x, y) = (fx.x as i32, fx.y as i32);
+            if !inside(x, y) {
+                continue;
+            }
+            if fx.kind == 0 {
+                let a = (60 + fx.ttl.min(260) * 150 / 260) as u8;
+                cv.blend(x, y, 1, 1, [120, 12, 14], a);
+                if fx.ttl > 150 {
+                    cv.blend(x + 1, y, 1, 1, [150, 20, 20], a / 2);
+                }
+            } else {
+                let a = (fx.ttl.clamp(0, 12) * 18) as u8;
+                let up = (12 - fx.ttl.clamp(0, 12)) / 4;
+                cv.blend(x - 1, y - up, 1, 1, [200, 180, 140], a);
+                cv.blend(x + 1, y - up, 1, 1, [200, 180, 140], a);
+                cv.blend(x, y - up - 1, 1, 1, [210, 195, 160], a / 2);
             }
         }
         if let Some(id) = sel {

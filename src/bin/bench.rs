@@ -11,7 +11,7 @@ fn main() {
     let t0 = Instant::now();
     let seed: u64 = std::env::var("SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(42);
     let map = std::env::var("MAP").ok().and_then(|m| evosim::worldgen::MapType::ALL.iter().copied().find(|t| t.name() == m)).unwrap_or(evosim::worldgen::MapType::Continents);
-    let mut s = Sim::new_with(w, h, prim, seed, map);
+    let mut s = Sim::new_cfg(w, h, prim, seed, map, prim && std::env::var("NO_MICROBES").is_err());
     println!("gen {:.2}s pop {} plants {}", t0.elapsed().as_secs_f32(), s.crs.len(), s.nplants);
     food_check(&s);
     for _ in 0..100 { s.step(8); }
