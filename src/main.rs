@@ -505,7 +505,7 @@ fn species_card(s: &Sim, sp: &Sp, x: f32, y: f32, w: f32) {
         txt(k, x + 130.0, y + 38.0 + i as f32 * 15.0, FS, DIM);
         txt(v, x + 176.0, y + 38.0 + i as f32 * 15.0, FS, FG);
     }
-    let members: Vec<&Cr> = s.crs.iter().filter(|c| c.sp == sp.id).collect();
+    let members: Vec<&Cr> = s.crs.iter().map(|c| &**c).filter(|c| c.sp == sp.id).collect();
     let mut my = y + 142.0;
     if !members.is_empty() {
         txt(&format!("living members ({})", members.len()), x, my, FS, DIM);
@@ -1519,10 +1519,13 @@ async fn amain() {
             // ---- draw (holding the lock: the world is a consistent snapshot)
             if let Some(id) = app.sel {
                 if let Some(&j) = s.idmap.get(&id) {
-                    app.sel_snap = Some(s.crs[j].clone());
+                    app.sel_snap = Some((*s.crs[j]).clone());
                 }
             }
-            let render_now = !fast || last_frame.elapsed().as_secs_f32() >= 1.0 / 20.0;
+            // at high speeds the world image is refreshed 12-20 times a second: composing it holds the
+            // simulation lock, and the motion is a blur anyway
+            let hz = if SPEEDS[app.si] >= 1000.0 { 12.0 } else { 20.0 };
+            let render_now = !fast || last_frame.elapsed().as_secs_f32() >= 1.0 / hz;
             if render_now {
                 last_frame = Instant::now();
             }

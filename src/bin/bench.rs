@@ -39,6 +39,7 @@ fn main() {
         }
     }
     let el = t0.elapsed().as_secs_f32();
+    println!("parallel: plants {:.2}s creatures {:.2}s | serial {:.2}s", s.prof[5], s.prof[7], el as f64 - s.prof[5] - s.prof[7]);
     println!("time: weather {:.2}s plants {:.2}s (decide {:.2} apply {:.2}) corpses {:.2}s creatures {:.2}s", s.prof[0], s.prof[1], s.prof[5], s.prof[6], s.prof[2], s.prof[4]);
         let mut forms = std::collections::BTreeMap::new(); for i in 0..s.n { if s.pl[i] > 0 { *forms.entry(s.vegetation.lineage(i).form().name()).or_insert(0) += 1; } }
     let mut tall = std::collections::BTreeMap::new(); for (i,l) in s.vegetation.lineages.iter().enumerate() { if s.vegetation.counts[i]>0 { *tall.entry(l.form().name()).or_insert(0u32) += s.vegetation.counts[i]; } }

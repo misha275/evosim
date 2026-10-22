@@ -57,7 +57,8 @@ enum Move {
 #[derive(Clone, Copy)]
 enum PlantAct {
     Clone(u32, u32),
-    Sprout(u32),
+    /// empty cell, nearby parent plant found in the parallel pass (u32::MAX = none), any grown plant seen
+    Sprout(u32, u32, bool),
     Die(u32),
     Grow(u32, u8),
     Seed(u32, u32),
@@ -129,6 +130,72 @@ pub struct Cr {
     /// warning colouration (vivid colours), 0..1
     #[serde(default)]
     pub warn: f32,
+}
+
+/// A creature's state while its turn is planned in parallel (copies of the fields the plan changes).
+struct Kin<'a> {
+    g: &'a Genome,
+    id: u32,
+    mom: Option<u32>,
+    nurse: f32,
+    pers: [f32; 3],
+    male: bool,
+    preg: bool,
+    sick: Option<(u32, i64)>,
+    col: Col,
+    age: f32,
+    pf: f32,
+    s: f32,
+    m34: f32,
+    max_e: f32,
+    nut: f32,
+    e: f32,
+    thr: Option<u32>,
+    tgt: Option<Tgt>,
+    fv: Option<(f32, f32)>,
+    consp: f32,
+    x: f32,
+    y: f32,
+    vx: f32,
+    vy: f32,
+    f: i8,
+    z: f32,
+    wa: f32,
+    rest: bool,
+    act: u8,
+    act_until: i64,
+    breath: f32,
+}
+
+/// Result of [`Sim::plan`], applied in the creature's serial turn.
+pub(crate) struct Plan {
+    age: f32,
+    pf: f32,
+    s: f32,
+    m34: f32,
+    max_e: f32,
+    nut: f32,
+    de: f32,
+    thr: Option<u32>,
+    tgt: Option<Tgt>,
+    fv: Option<(f32, f32)>,
+    consp: f32,
+    x: f32,
+    y: f32,
+    vx: f32,
+    vy: f32,
+    f: i8,
+    z: f32,
+    wa: f32,
+    rest: bool,
+    act: u8,
+    act_until: i64,
+    breath: f32,
+    sickf: f32,
+    spread: Option<u32>,
+    recovered: Option<u32>,
+    idx: usize,
+    in_water: bool,
 }
 
 /// Short-lived visual effects in the world (blood at a kill, dust of a pounce).
@@ -346,7 +413,8 @@ pub struct Sim {
     pub crowd_w: f32,
     /// plants growing in water cells
     pub nwater_plants: i64,
-    pub crs: Vec<Cr>,
+    /// creatures are boxed so a creature can be taken out for its turn by moving a pointer, not ~0.5 KB
+    pub crs: Vec<Box<Cr>>,
     pub cor: Vec<Co>,
     pub bones: Vec<Bo>,
     pub poop: Vec<Poop>,
@@ -400,6 +468,11 @@ pub struct Sim {
     pub pcount: Vec<u16>,
     #[serde(skip)]
     pub idmap: FxHashMap<u32, usize>,
+    #[serde(skip)]
+    spare: Option<Box<Cr>>,
+    /// per creature (by index, this step): 1 / visibility^2, see `look`
+    #[serde(skip)]
+    inv_seen2: Vec<f32>,
     #[serde(skip)]
     pub kmap: FxHashMap<u32, usize>,
     #[serde(skip)]
@@ -518,6 +591,8 @@ impl Sim {
             pcount: vec![],
             occ: vec![],
             idmap: FxHashMap::default(),
+            spare: None,
+            inv_seen2: Vec::new(),
             kmap: FxHashMap::default(),
             cgrid: vec![],
             nutrients: vec![],
@@ -962,7 +1037,7 @@ impl Sim {
                 self.nherb += 1;
             }
         }
-        self.crs.push(c);
+        self.crs.push(Box::new(c));
         let idx = self.crs.len() - 1;
         self.idmap.insert(id, idx);
         Some(idx)
@@ -1045,9 +1120,10 @@ impl Sim {
     }
 
     fn kill_idx(&mut self, j: usize, corpse: bool) {
-        let mut o = std::mem::replace(&mut self.crs[j], Cr::placeholder());
+        let spare = self.spare.take().unwrap_or_else(|| Box::new(Cr::placeholder()));
+        let mut o = std::mem::replace(&mut self.crs[j], spare);
         self.kill(&mut o, corpse);
-        self.crs[j] = o;
+        self.spare = Some(std::mem::replace(&mut self.crs[j], o));
     }
 
     pub fn kill_id(&mut self, id: u32) {
@@ -1700,10 +1776,8 @@ impl Sim {
                     let (dx, dy) = (o.x - x, o.y - y);
                     let mut d = dx * dx + dy * dy;
                     let og = &o.g;
-                    // camouflage: bodies matching the ground are seen only up close; movement and size give them away
-                    let mov = if o.vx.abs() + o.vy.abs() > 0.1 { 1.35 } else { 1.0 };
-                    let seen = (o.consp + (0.75 - o.consp) * 0.6 * dk) * mov * (1.0 + 0.04 * (o.s - 6.0).max(0.0)).min(2.0);
-                    d /= (seen * seen).max(0.04);
+                    // camouflage: bodies matching the ground are seen only up close (see `visibility`)
+                    d *= self.inv_seen2.get(oj as usize).copied().unwrap_or(1.0);
                     if d > v2 {
                         if d < mate_r2 && ready && o.sp == sp && !o.male && o.preg.is_none() && o.cool <= 0 && d < md
                             && o.age >= mat_age(og) && o.e >= og.v[THRESH] * o.max_e * 0.7 {
@@ -1835,7 +1909,8 @@ impl Sim {
         let b = self.bg[i];
         let st = self.pl[i];
         if st > 0 && self.terr[i] != 1 {
-            let c = hsv(self.vegetation.lineage(i).g[veg::HUE], 42.0 + st as f32 * 8.0, 26.0 + st as f32 * 13.0);
+            let h = (self.vegetation.lineage(i).g[veg::HUE].rem_euclid(360.0) as usize).min(359);
+            let c = cover_lut()[h][(st as usize - 1).min(2)];
             mix(b, c, 0.55 + 0.15 * st as f32)
         } else {
             b
@@ -1844,7 +1919,7 @@ impl Sim {
 
     /// How much a body stands out from its surroundings: colour distance to the ground nearby.
     /// Patterns break the outline where there is cover; the Camouflage quirk hides it further.
-    fn conspicuousness(&self, c: &Cr, idx: usize) -> f32 {
+    fn conspicuousness(&self, col: Col, g: &Genome, idx: usize) -> f32 {
         let (x, y) = (idx % self.w, idx / self.w);
         let mut acc = [0u32; 3];
         let mut n = 0;
@@ -1859,49 +1934,54 @@ impl Sim {
             }
         }
         let gnd = [(acc[0] / n) as f32, (acc[1] / n) as f32, (acc[2] / n) as f32];
-        let b = c.col;
+        let b = col;
         let diff = ((b[0] as f32 - gnd[0]).abs() * 0.3 + (b[1] as f32 - gnd[1]).abs() * 0.45 + (b[2] as f32 - gnd[2]).abs() * 0.25) / 255.0;
         let mut k = 0.3 + 2.4 * diff;
-        if c.g.pat != 0 && self.pl[idx] >= 2 {
+        if g.pat != 0 && self.pl[idx] >= 2 {
             k -= 0.08;
         }
-        if c.g.has(CAMOUFLAGE) {
+        if g.has(CAMOUFLAGE) {
             k *= 0.7;
         }
         k.clamp(0.3, 1.3)
     }
 
-    /// Open water = lake or sea (rivers are fords).
-    #[inline]
-    fn is_open_water(&self, x: f32, y: f32) -> bool {
-        let i = y as usize * self.w + x as usize;
-        self.terr[i] == 1 && self.biome.get(i) != Some(&(crate::worldgen::Biome::River as u8))
-    }
 
     /// Can a body moving in `mode` step from (fx,fy) to (x,y)? Shorelines are barriers: amphibious
     /// animals cross them only on a successful `climb` roll, stay out of deep sea, and aquatic ones
     /// never leave the water.
     fn can_enter(&self, fx: f32, fy: f32, x: f32, y: f32, mode: Move, climb: bool) -> bool {
+        let fi = fy as usize * self.w + fx as usize;
+        self.enter(self.wet_cell(fi), x, y, mode, climb).is_some()
+    }
+
+    /// Open water (lake or sea) at cell `i`.
+    #[inline]
+    fn wet_cell(&self, i: usize) -> bool {
+        self.terr[i] == 1 && self.biome[i] != crate::worldgen::Biome::River as u8
+    }
+
+    /// One movement step into (x, y) from a cell whose open-water status is `from_wet`:
+    /// None if blocked, else whether the destination is open water.
+    #[inline]
+    fn enter(&self, from_wet: bool, x: f32, y: f32, mode: Move, climb: bool) -> Option<bool> {
         if x < 1.0 || y < 1.0 || x >= (self.w - 1) as f32 || y >= (self.h - 1) as f32 {
-            return false;
+            return None;
         }
         let i = y as usize * self.w + x as usize;
         let t = self.terr[i];
-        match mode {
+        let wet = t == 1 && self.biome[i] != crate::worldgen::Biome::River as u8;
+        let ok = match mode {
             Move::Air => true,
             Move::Aquatic => t == 1,
-            Move::Walker => self.ok(x, y, false),
+            // rivers can be waded across; lakes and the sea need swimmers
+            Move::Walker => t == 0 || t == 3 || (t == 1 && !wet),
             Move::Amphibious => {
-                if t == 2 {
-                    return false;
-                }
-                let to_wet = self.is_open_water(x, y);
-                if to_wet && self.elevation[i] < crate::worldgen::SEA - 6 {
-                    return false; // deep sea needs gills
-                }
-                to_wet == self.is_open_water(fx, fy) || climb
+                // deep sea needs gills; shorelines are crossed only with effort
+                t != 2 && !(wet && self.elevation[i] < crate::worldgen::SEA - 6) && (wet == from_wet || climb)
             }
-        }
+        };
+        if ok { Some(wet) } else { None }
     }
 
     #[inline]
@@ -1966,18 +2046,29 @@ impl Sim {
         }
     }
 
-    fn grown_plant_near(&self, x: f32, y: f32, reach: f32) -> Option<usize> {
+    /// Fills `out` with grown plants within `reach`; returns how many were found.
+    fn grown_plants_near(&self, x: f32, y: f32, reach: f32, out: &mut [usize]) -> usize {
         let r = reach.ceil() as i64;
         let (cx, cy) = (x as i64, y as i64);
+        let mut k = 0;
         for yy in (cy - r).max(0)..=(cy + r).min(self.h as i64 - 1) {
+            let row = yy as usize * self.w;
+            let dy2 = (yy as f32 + 0.5 - y).powi(2);
+            if dy2 >= reach * reach {
+                continue;
+            }
             for xx in (cx - r).max(0)..=(cx + r).min(self.w as i64 - 1) {
-                let i = yy as usize * self.w + xx as usize;
-                if self.pl[i] >= 2 && (xx as f32 + 0.5 - x).powi(2) + (yy as f32 + 0.5 - y).powi(2) < reach * reach {
-                    return Some(i);
+                let i = row + xx as usize;
+                if self.pl[i] >= 2 && (xx as f32 + 0.5 - x).powi(2) + dy2 < reach * reach {
+                    out[k] = i;
+                    k += 1;
+                    if k == out.len() {
+                        return k;
+                    }
                 }
             }
         }
-        None
+        k
     }
 
     /// Kin predators within `r` cells (pack members).
@@ -1997,13 +2088,23 @@ impl Sim {
         n
     }
 
-    fn live(&mut self, ci: usize, look: Option<(Option<u32>, Option<Tgt>)>) {
-        let mut c = std::mem::replace(&mut self.crs[ci], Cr::placeholder());
-        self.live_inner(&mut c, look);
-        self.crs[ci] = c;
+    fn live(&mut self, ci: usize, p: Plan) {
+        // swap the creature out with a reusable stand-in (no allocation per turn)
+        let spare = self.spare.take().unwrap_or_else(|| Box::new(Cr::placeholder()));
+        let mut c = std::mem::replace(&mut self.crs[ci], spare);
+        self.live_inner(&mut c, p);
+        self.spare = Some(std::mem::replace(&mut self.crs[ci], c));
     }
 
-    fn live_inner(&mut self, c: &mut Cr, look: Option<(Option<u32>, Option<Tgt>)>) {
+    /// The read-only part of a creature's turn (growth, steering, movement, energy bill), computed for
+    /// all creatures in parallel against the world as it was at the start of the step.
+    fn plan(&self, c0: &Cr, look: Option<(Option<u32>, Option<Tgt>)>, rng: &mut Rng) -> Plan {
+        let mut c = Kin {
+            g: &c0.g, id: c0.id, mom: c0.mom, nurse: c0.nurse, pers: c0.pers, male: c0.male, preg: c0.preg.is_some(),
+            sick: c0.sick, col: c0.col, age: c0.age, pf: c0.pf, s: c0.s, m34: c0.m34, max_e: c0.max_e, nut: c0.nut, e: c0.e,
+            thr: c0.thr, tgt: c0.tgt, fv: c0.fv, consp: c0.consp, x: c0.x, y: c0.y, vx: c0.vx, vy: c0.vy, f: c0.f, z: c0.z,
+            wa: c0.wa, rest: c0.rest, act: c0.act, act_until: c0.act_until, breath: c0.breath,
+        };
         let t = self.t;
         let dt = self.dt;
         let dtf = dt as f32;
@@ -2017,29 +2118,7 @@ impl Sim {
         let mm = MK * c.s.powi(3);
         c.m34 = mm.powf(0.75);
         c.max_e = (60.0 + 110.0 * mm) * (1.0 + 0.8 * meat_eff(c.g.v[DIET]));
-        if c.cool > 0 {
-            c.cool -= dt;
-        }
-        // colonies divide only while they stay under their own share of the population limit,
-        // so they cannot crowd animals out
-        if c.g.v[COMPLEXITY] < 0.42 && c.age >= c.g.v[MAT] && c.cool <= 0 && c.e > 0.75 * c.max_e && self.nmicro < self.micro_cap() {
-            let (h1, _) = gamete(&mut self.rng, &c.hap.0, &c.hap.1);
-            let (h2, note) = gamete(&mut self.rng, &c.hap.0, &c.hap.1);
-            let child_g = phenotype(&mut self.rng, &h1, &h2);
-            let sp = self.classify(&child_g, c.sp);
-            let energy = c.e * 0.4;
-            self.spawn(h1, h2, sp, Some((c.id, c.gen)), Some((c.x, c.y)), Some(energy), &note, None, Some(child_g));
-            c.e -= energy;
-            c.cool = c.g.v[MAT] as i32;
-        }
         c.nut += ((c.e / c.max_e).min(1.0) - c.nut) * (1.0 - 0.997f32.powi(dt));
-        if let Some((due, _)) = &c.preg {
-            if t >= *due {
-                let (_, sperm) = c.preg.take().unwrap();
-                self.deliver(c, sperm);
-                c.cool = 500;
-            }
-        }
         if let Some((thr, tg)) = look {
             c.thr = thr;
             c.tgt = tg;
@@ -2053,6 +2132,7 @@ impl Sim {
             c.fv = self.fire_near(x, y, 28.0);
         }
         let mut sickf = 0.0;
+        let (mut spread, mut recovered) = (None, None);
         if let Some((st, t0)) = c.sick {
             let ag = t - t0;
             let s = &self.strains[st as usize];
@@ -2061,16 +2141,15 @@ impl Sim {
                     sickf = s.vir * (1.0 - 0.55 * c.g.v[IMMUNE]);
                     c.e -= sickf * 0.0006 * c.max_e * dtf;
                     if self.every(3, c.id as i64) {
-                        self.spread(c, st);
+                        spread = Some(st);
                     }
                 } else {
-                    c.imm.push((st, t + 4000));
-                    c.sick = None;
+                    recovered = Some(st);
                 }
             }
         }
-        if self.every(6, c.id as i64) || c.consp == 0.0 {
-            c.consp = self.conspicuousness(c, idx);
+        if self.every(40, c.id as i64) || c.consp == 0.0 {
+            c.consp = self.conspicuousness(c.col, c.g, idx);
         }
         let hib = q & HIBERNATOR != 0 && temp < 0.32;
         let (mut ux, mut uy) = (0f32, 0f32);
@@ -2150,7 +2229,7 @@ impl Sim {
                 }
             }
             if ux == 0.0 && uy == 0.0 {
-                c.wa += self.rng.gen_range(-0.3..0.3) * dtf.sqrt();
+                c.wa += rng.gen_range(-0.3..0.3) * dtf.sqrt();
                 ux = c.wa.cos();
                 uy = c.wa.sin();
             }
@@ -2204,24 +2283,30 @@ impl Sim {
             Move::Walker
         };
         let mut crossed = false;
+        let mut cur_wet = self.wet_cell(idx);
         for _ in 0..dt {
             // hauling out of / slipping into the water takes several attempts at the shoreline
-            let climb = self.rr() < 0.3;
+            let climb = rng.gen::<f32>() < 0.3;
             let (tx, ty) = (nx + c.vx, ny + c.vy);
-            let step = if self.can_enter(nx, ny, tx, ty, mode, climb) {
-                Some((tx, ty))
-            } else if self.can_enter(nx, ny, tx, ny, mode, climb) {
-                Some((tx, ny))
-            } else if self.can_enter(nx, ny, nx, ty, mode, climb) {
-                Some((nx, ty))
+            // still inside the same cell: nothing to check
+            if tx.floor() == nx.floor() && ty.floor() == ny.floor() {
+                nx = tx;
+                ny = ty;
+                continue;
+            }
+            let step = if let Some(wt) = self.enter(cur_wet, tx, ty, mode, climb) {
+                Some((tx, ty, wt))
+            } else if let Some(wt) = self.enter(cur_wet, tx, ny, mode, climb) {
+                Some((tx, ny, wt))
             } else {
-                None
+                self.enter(cur_wet, nx, ty, mode, climb).map(|wt| (nx, ty, wt))
             };
             match step {
-                Some((ax, ay)) => {
-                    if self.is_open_water(nx, ny) != self.is_open_water(ax, ay) {
+                Some((ax, ay, wt)) => {
+                    if wt != cur_wet {
                         crossed = true;
                     }
+                    cur_wet = wt;
                     nx = ax;
                     ny = ay;
                 }
@@ -2229,8 +2314,8 @@ impl Sim {
                     // pressed against the shore: lose momentum, maybe give up this target
                     c.vx *= 0.3;
                     c.vy *= 0.3;
-                    if self.rr() < 0.35 {
-                        c.wa = self.rr() * 6.28;
+                    if rng.gen::<f32>() < 0.35 {
+                        c.wa = rng.gen::<f32>() * 6.28;
                         c.tgt = None;
                     }
                     break;
@@ -2257,16 +2342,6 @@ impl Sim {
         if c.breath <= 0.0 {
             c.e -= c.max_e * 0.015 * dtf;
         }
-        if c.g.v[COMPLEXITY] < 0.42 && in_water {
-            // photosynthesis / filter feeding draws on the local nutrient pool, shared with neighbours
-            let want = 0.035 * dtf * (1.0 - self.dark) * (0.4 + self.moisture[idx] as f32 / 255.0);
-            let gi = self.nb_index(c.x, c.y);
-            if let Some(pool) = self.nutrients.get_mut(gi) {
-                let take = want.min(*pool);
-                *pool -= take;
-                c.e += take;
-            }
-        }
         if c.vx > 0.04 {
             c.f = 1;
         } else if c.vx < -0.04 {
@@ -2288,7 +2363,7 @@ impl Sim {
         if c.z > 0.5 {
             cost *= 1.8 + g.v[SIZE] * 0.08;
         }
-        if c.preg.is_some() {
+        if c.preg {
             cost *= 1.2;
         }
         if q & GLUTTON != 0 {
@@ -2300,6 +2375,65 @@ impl Sim {
         c.e -= cost * dtf;
         if c.z <= 0.5 && !self.fire.is_empty() && self.fire.contains_key(&(nidx as u32)) {
             c.e -= c.max_e * 0.08 * dtf;
+        }
+        Plan {
+            age: c.age, pf: c.pf, s: c.s, m34: c.m34, max_e: c.max_e, nut: c.nut, de: c.e - c0.e, thr: c.thr, tgt: c.tgt,
+            fv: c.fv, consp: c.consp, x: c.x, y: c.y, vx: c.vx, vy: c.vy, f: c.f, z: c.z, wa: c.wa, rest: c.rest, act: c.act,
+            act_until: c.act_until, breath: c.breath, sickf, spread, recovered, idx, in_water,
+        }
+    }
+
+    fn live_inner(&mut self, c: &mut Cr, p: Plan) {
+        let t = self.t;
+        let dt = self.dt;
+        let dtf = dt as f32;
+        let q = c.g.q;
+        let sickf = p.sickf;
+        (c.age, c.pf, c.s, c.m34, c.max_e, c.nut) = (p.age, p.pf, p.s, p.m34, p.max_e, p.nut);
+        (c.thr, c.tgt, c.fv, c.consp) = (p.thr, p.tgt, p.fv, p.consp);
+        (c.x, c.y, c.vx, c.vy, c.f, c.z, c.wa, c.rest) = (p.x, p.y, p.vx, p.vy, p.f, p.z, p.wa, p.rest);
+        (c.act, c.act_until, c.breath) = (p.act, p.act_until, p.breath);
+        c.e += p.de;
+        if c.cool > 0 {
+            c.cool -= dt;
+        }
+        // colonies divide only while they stay under their own share of the population limit,
+        // so they cannot crowd animals out
+        if c.g.v[COMPLEXITY] < 0.42 && c.age >= c.g.v[MAT] && c.cool <= 0 && c.e > 0.75 * c.max_e && self.nmicro < self.micro_cap() {
+            let (h1, _) = gamete(&mut self.rng, &c.hap.0, &c.hap.1);
+            let (h2, note) = gamete(&mut self.rng, &c.hap.0, &c.hap.1);
+            let child_g = phenotype(&mut self.rng, &h1, &h2);
+            let sp = self.classify(&child_g, c.sp);
+            let energy = c.e * 0.4;
+            self.spawn(h1, h2, sp, Some((c.id, c.gen)), Some((c.x, c.y)), Some(energy), &note, None, Some(child_g));
+            c.e -= energy;
+            c.cool = c.g.v[MAT] as i32;
+        }
+        if let Some((due, _)) = &c.preg {
+            if t >= *due {
+                let (_, sperm) = c.preg.take().unwrap();
+                self.deliver(c, sperm);
+                c.cool = 500;
+            }
+        }
+        if let Some(st) = p.spread {
+            self.spread(c, st);
+        }
+        if let (Some(st), Some((cur, _))) = (p.recovered, c.sick) {
+            if st == cur {
+                c.imm.push((st, t + 4000));
+                c.sick = None;
+            }
+        }
+        if c.g.v[COMPLEXITY] < 0.42 && p.in_water {
+            // photosynthesis / filter feeding draws on the local nutrient pool, shared with neighbours
+            let want = 0.035 * dtf * (1.0 - self.dark) * (0.4 + self.moisture[p.idx] as f32 / 255.0);
+            let gi = self.nb_index(c.x, c.y);
+            if let Some(pool) = self.nutrients.get_mut(gi) {
+                let take = want.min(*pool);
+                *pool -= take;
+                c.e += take;
+            }
         }
         // ---- act on target
         if let (Some(tg), true) = (c.tgt, c.z <= 0.5) {
@@ -2315,15 +2449,19 @@ impl Sim {
                         // big mouths take several plants per meal (each plant gives at most a fixed amount)
                         let mouthful = ((0.1 + 1.8 * c.m34) / 3.0).ceil().max(1.0) as i32;
                         let bites = ((1 + (dt - 1) / 3) * mouthful).min(16);
-                        let mut cell = Some(o);
-                        let mut n = 0;
-                        while let Some(o) = cell {
-                            self.graze(c, o, glut);
-                            n += 1;
-                            if n >= bites || c.e >= c.max_e {
-                                break;
+                        self.graze(c, o, glut);
+                        if bites > 1 && c.e < c.max_e {
+                            // one scan of the neighbourhood finds all the further bites
+                            let mut more = [0usize; 16];
+                            let k = self.grown_plants_near(c.x, c.y, reach, &mut more[..(bites - 1) as usize]);
+                            for &o in &more[..k] {
+                                if c.e >= c.max_e {
+                                    break;
+                                }
+                                if self.pl[o] >= 2 {
+                                    self.graze(c, o, glut);
+                                }
                             }
-                            cell = self.grown_plant_near(c.x, c.y, reach);
                         }
                         c.tgt = None;
                     }
@@ -2519,21 +2657,26 @@ impl Sim {
         // Sorted samples turn random cell lookups into a forward sweep; chunks are decided in
         // parallel (read-only, memory-latency bound) and the resulting actions applied in order.
         // Ascending samples from random gaps (mean n/ps): uniform coverage, no sort needed.
-        let gap = (2 * n / self.ps).max(2) as u32;
-        let mut samples: Vec<u32> = Vec::with_capacity(self.ps + 64);
-        let mut pos = self.rng.gen_range(0..gap);
-        while (pos as usize) < n {
-            samples.push(pos);
-            pos += 1 + self.rng.gen_range(0..gap - 1);
-        }
+        // The map is cut into blocks of ~CHUNK samples; each parallel task draws its own samples.
+        let gap = (2 * n / self.ps).max(3);
         let _ta = std::time::Instant::now();
         const CHUNK: usize = 2048;
-        let seeds: Vec<u64> = (0..samples.len().div_ceil(CHUNK)).map(|_| self.rng.gen()).collect();
+        let block = CHUNK * (gap / 2);
+        let nblocks = n.div_ceil(block);
+        let seeds: Vec<u64> = (0..nblocks).map(|_| self.rng.gen()).collect();
         let winter = (self.t % SEASON) * 4 / SEASON == 3;
         let drought = if self.wx.kind.dry() { self.wx.int } else { 0.0 };
         let me: &Sim = self;
-        let decide = |(ci, chunk): (usize, &[u32])| -> Vec<PlantAct> {
+        let decide = |ci: usize| -> Vec<PlantAct> {
             let mut r = Rng::seed_from_u64(seeds[ci]);
+            let (b0, b1) = (ci * block, ((ci + 1) * block).min(n));
+            let mut samples: Vec<u32> = Vec::with_capacity(CHUNK + 64);
+            let mut pos = b0 + r.gen_range(0..gap);
+            while pos < b1 {
+                samples.push(pos as u32);
+                pos += 1 + r.gen_range(0..gap - 1);
+            }
+            let chunk = &samples[..];
             let mut out = Vec::new();
             for (k, &iu) in chunk.iter().enumerate() {
                 let i = iu as usize;
@@ -2551,7 +2694,25 @@ impl Sim {
                 if me.occ[i >> 6] & (1 << (i & 63)) == 0 {
                     let cr = if me.terr[i] == 1 { crowd_w } else { crowd };
                     if cr > 0.0 && r.gen::<f32>() < sprout && (me.terr[i] == 0 || me.terr[i] == 1) {
-                        out.push(PlantAct::Sprout(iu));
+                        // look for a parent plant around the empty cell here, in parallel
+                        let ti = me.temp_at(i);
+                        let (mut src, mut seen) = (u32::MAX, false);
+                        for _ in 0..12 {
+                            let x = (i % w) as i32 + r.gen_range(-4..=4);
+                            let y = (i / w) as i32 + r.gen_range(-4..=4);
+                            if x < 0 || y < 0 || x as usize >= w || y as usize >= h {
+                                continue;
+                            }
+                            let j = y as usize * w + x as usize;
+                            if me.pl[j] >= 2 {
+                                seen = true;
+                                if Vegetation::suitability_of(me.vegetation.lineage(j), me.moisture[i], ti, me.terr[i] == 1) > 0.15 {
+                                    src = j as u32;
+                                    break;
+                                }
+                            }
+                        }
+                        out.push(PlantAct::Sprout(iu, src, seen));
                     }
                     continue;
                 }
@@ -2626,15 +2787,21 @@ impl Sim {
             }
             out
         };
-        let acts: Vec<Vec<PlantAct>> = samples.par_chunks(CHUNK).enumerate().map(decide).collect();
+        let acts: Vec<Vec<PlantAct>> = (0..nblocks).into_par_iter().map(decide).collect();
         self.prof[5] += _ta.elapsed().as_secs_f64();
         let _tb = std::time::Instant::now();
         for act in acts.into_iter().flatten() {
             match act {
-                PlantAct::Sprout(i) => {
+                PlantAct::Sprout(i, src, seen) => {
                     let i = i as usize;
                     if self.pl[i] == 0 {
-                        self.sprout(i);
+                        if src != u32::MAX && self.pl[src as usize] >= 2 {
+                            let t = self.t;
+                            let child = self.vegetation.seed(&mut self.rng, src as usize, i, t);
+                            self.setp(i, 1, Some(child));
+                        } else if !seen || self.rr() < 0.1 {
+                            self.setp(i, 1, None);
+                        }
                     }
                 }
                 PlantAct::Die(i) => self.setp(i as usize, 0, None),
@@ -2760,8 +2927,12 @@ let __t1 = std::time::Instant::now();
         // droppings: fertilise, plant seeds, spread pathogens
         let every30 = self.every(30, 0);
         let mut poop = std::mem::take(&mut self.poop);
+        {
+            // rain washes droppings away twice as fast
+            let a = &self.atmosphere;
+            poop.par_iter_mut().with_min_len(1024).for_each(|p| p.ttl -= dt * if a.rain_at(p.x, p.y) > 0.1 { 2 } else { 1 });
+        }
         for p in poop.iter_mut() {
-            p.ttl -= dt * if self.atmosphere.rain_at(p.x, p.y) > 0.1 { 2 } else { 1 };
             if let (Some(inf), true) = (p.inf, every30) {
                 let gi = (p.y as usize / CG) * self.gwc + p.x as usize / CG;
                 let cands: Vec<usize> = self.cgrid[gi].iter().map(|&j| j as usize).collect();
@@ -2834,21 +3005,52 @@ let __t3 = std::time::Instant::now();
             })
             .collect();
 
-        self.prof[3] += __t3.elapsed().as_secs_f64();        let me: &Sim = self;
-        let looks: Vec<Option<(Option<u32>, Option<Tgt>)>> = if n0 > 64 {
-            (0..n0).into_par_iter().with_min_len(16).map(|i| if lookers[i] { Some(me.look(i)) } else { None }).collect()
-        } else {
-            (0..n0).map(|i| if lookers[i] { Some(me.look(i)) } else { None }).collect()
+        self.prof[3] += __t3.elapsed().as_secs_f64();        // perception and movement in parallel; each creature gets its own random stream, so the result
+        // does not depend on the thread count
+        let base: u64 = self.rng.gen();
+        // camouflage: how far away each body can be noticed (movement and size give animals away);
+        // stored as 1/seen^2 to scale squared distances
+        let dk = self.dark;
+        let inv: Vec<f32> = self
+            .crs
+            .par_iter()
+            .with_min_len(256)
+            .map(|o| {
+                let mov = if o.vx.abs() + o.vy.abs() > 0.1 { 1.35 } else { 1.0 };
+                let seen = (o.consp + (0.75 - o.consp) * 0.6 * dk) * mov * (1.0 + 0.04 * (o.s - 6.0).max(0.0)).min(2.0);
+                1.0 / (seen * seen).max(0.04)
+            })
+            .collect();
+        self.inv_seen2 = inv;
+        let me: &Sim = self;
+        let job = |i: usize| -> Option<Plan> {
+            let c = &me.crs[i];
+            if c.dead {
+                return None;
+            }
+            let lk = if lookers[i] { Some(me.look(i)) } else { None };
+            let mut r = Rng::seed_from_u64(base ^ (c.id as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            Some(me.plan(c, lk, &mut r))
         };
+        let __tp = std::time::Instant::now();
+        let looks: Vec<Option<Plan>> = if n0 > 64 {
+            (0..n0).into_par_iter().with_min_len(8).map(job).collect()
+        } else {
+            (0..n0).map(job).collect()
+        };
+        self.prof[7] += __tp.elapsed().as_secs_f64();
 let __t4 = std::time::Instant::now();
-        for (i, lk) in looks.into_iter().enumerate() {
-            if !self.crs[i].dead {
-                self.live(i, lk);
+        for (i, p) in looks.into_iter().enumerate() {
+            if let Some(p) = p {
+                if !self.crs[i].dead {
+                    self.live(i, p);
+                }
             }
         }
         self.crs.retain(|c| !c.dead);
         self.prof[4] += __t4.elapsed().as_secs_f64();
-        self.idmap = self.crs.iter().enumerate().map(|(i, c)| (c.id, i)).collect();
+        self.idmap.clear();
+        self.idmap.extend(self.crs.iter().enumerate().map(|(i, c)| (c.id, i)));
         let _ = dtf;
         if !self.primordial && self.crs.len() < 14 {
             let b = base_genome(&mut self.rng, Kind::Herb);
@@ -3038,4 +3240,19 @@ let __t4 = std::time::Instant::now();
         let col = self.species[sp as usize].col;
         self.logmsg(msg, col);
     }
+}
+
+/// Ground-cover colours by leaf hue (1 degree steps) and growth stage 1..3 (shared with the renderer).
+pub fn cover_lut() -> &'static [[Col; 3]; 360] {
+    static LUT: std::sync::OnceLock<Box<[[Col; 3]; 360]>> = std::sync::OnceLock::new();
+    LUT.get_or_init(|| {
+        let mut t = Box::new([[[0u8; 3]; 3]; 360]);
+        for (h, row) in t.iter_mut().enumerate() {
+            for (k, c) in row.iter_mut().enumerate() {
+                let st = (k + 1) as f32;
+                *c = hsv(h as f32 + 0.5, 42.0 + st * 8.0, 26.0 + st * 13.0);
+            }
+        }
+        t
+    })
 }

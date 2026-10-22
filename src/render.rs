@@ -972,11 +972,15 @@ pub struct WorldRenderer {
     base_key: (u64, usize, u8, i64),
     pub sprites: FxHashMap<(u32, u8, u8), Sprite>,
     sprite_epoch: u32,
+    /// leaf hue (whole degrees) of every plant lineage: a compact table the ground pass reads instead of
+    /// the full lineage records (far fewer cache misses)
+    hue_of: Vec<u16>,
+    hue_epoch: u32,
 }
 
 impl WorldRenderer {
     pub fn new() -> Self {
-        WorldRenderer { px: vec![], base: vec![], base_key: (u64::MAX, 0, 0, 0), sprites: FxHashMap::default(), sprite_epoch: 0 }
+        WorldRenderer { px: vec![], base: vec![], base_key: (u64::MAX, 0, 0, 0), sprites: FxHashMap::default(), sprite_epoch: 0, hue_of: Vec::new(), hue_epoch: u32::MAX }
     }
 
     pub fn reset(&mut self) {
@@ -1011,24 +1015,36 @@ impl WorldRenderer {
         let (rx0, ry0, rx1, ry1) = (rect.0.max(0), rect.1.max(0), rect.2.min(w), rect.3.min(h));
         // margins so sprites partially outside the view still draw
         let (mx0, my0, mx1, my1) = ((rx0 - 16).max(0), (ry0 - 4).max(0), (rx1 + 16).min(w), (ry1 + 40).min(h));
-        for y in my0..my1 {
-            let row = (y * w) as usize;
+        // the ground layer, row by row on all cores (this runs while the simulation waits for the frame)
+        let veg = &s.vegetation;
+        if self.hue_epoch != veg.epoch || self.hue_of.len() > veg.lineages.len() {
+            self.hue_of.clear();
+            self.hue_epoch = veg.epoch;
+        }
+        for l in &veg.lineages[self.hue_of.len()..] {
+            self.hue_of.push((l.g[HUE].rem_euclid(360.0) as u16).min(359));
+        }
+        let hue_of = &self.hue_of;
+        let base = &self.base;
+        let lut = cover_lut();
+        let rows = &mut self.px[(my0 * w) as usize..(my1 * w) as usize];
+        rows.par_chunks_mut(w as usize).enumerate().for_each(|(ry, out)| {
+            let row = ((my0 + ry as i32) * w) as usize;
             for x in mx0..mx1 {
                 let i = row + x as usize;
                 let st = s.pl[i];
-                self.px[i] = if st > 0 && mode == MapMode::Terrain {
+                out[x as usize] = if st > 0 && mode == MapMode::Terrain {
                     // ground cover tinted by the lineage's own leaf colour
-                    let hue = s.vegetation.lineage(i).g[HUE];
-                    let c = hsv(hue, 42.0 + st as f32 * 8.0, 26.0 + st as f32 * 13.0);
-                    let b = self.base[i];
+                    let c = lut[hue_of[veg.ids[i] as usize] as usize][(st as usize - 1).min(2)];
+                    let b = base[i];
                     // algae stay a subtle tint so lakes and seas keep their colour
                     let k = if s.terr[i] == 1 { 0.18 + 0.06 * st as f32 } else { 0.55 + 0.15 * st as f32 };
                     [mixc(b[0], c[0], k), mixc(b[1], c[1], k), mixc(b[2], c[2], k), 255]
                 } else {
-                    self.base[i]
+                    base[i]
                 };
             }
-        }
+        });
         // animated water glints
         let mut i = if mode == MapMode::Terrain { (my0 * w + mx0) as usize } else { usize::MAX - 64 };
         let end = if mode == MapMode::Terrain { (my1 * w) as usize } else { 0 };

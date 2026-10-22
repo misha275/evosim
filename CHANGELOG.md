@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.6.1
+- Faster on many-core CPUs: the single-threaded share of a simulation step is roughly halved.
+  - Creature movement, growth and the energy bill run in parallel together with perception (each creature has its own
+    random stream, so results do not depend on the thread count); only interactions (eating, hunting, mating, births)
+    stay sequential.
+  - Plant sampling and the search for a parent plant of a sprout run in parallel; droppings age in parallel.
+  - Creatures are boxed (a turn moves a pointer instead of ~0.5 KB), no allocation per turn, one neighbourhood scan per
+    meal, cheaper shoreline checks, camouflage refreshed every 40 ticks.
+  - On 2 cores: +28% ticks/s; the sequential part per 40k ticks went from ~17 s to ~8.6 s.
+- The world image is composed on all cores with a colour table instead of per-pixel HSV maths (full giant map
+  31 -> 11 ms single-threaded); at x1000 and faster it is refreshed 12 times a second. Composing holds the simulation
+  lock, so the simulation waits less.
+
 ## 2.6.0
 - Giants: gigantism is a late innovation. After ~30 generations of complex animals the size limit starts rising from 8
   up to 26 (reached around generation 120). Big bodies mature later, store far more energy, are safe from small
