@@ -139,7 +139,9 @@ Primordial worlds contain microbial colonies and photosynthetic biofilms/algae; 
 those colonies. Colonies have their own population limit (independent of animals) and are drawn dimmed; the animal
 sandbox has none.
 
-Predators and herbivores: digestion of plants and meat follows steep curves, so specialists do well and omnivores are rare.
+Predators and herbivores: meat is energy-dense (a kill is worth several plants' worth of food), digestion follows steep
+curves (specialists do well, omnivores are rare), and every defence of the prey (armor, camouflage, herds, spines,
+venom, speed) has a counter the hunters can evolve (jaws, keen eyes, packs, armor, immunity, speed).
 Predators hunt in packs, feed their young from kills and rest when sated; they have their own look (long low body,
 dorsal stripe, fangs, claws) and hunting animations (gallop, pounce, feeding, blood). Swimmers float half-submerged with
 ripples and a wake; shorelines and deep sea are real barriers.

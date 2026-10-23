@@ -24,6 +24,8 @@ const NUTRIENT_CAP: f32 = 60.0;
 const NB: usize = 64;
 pub const TICK_S: f32 = 0.2;
 pub const MK: f32 = 0.0032;
+/// Meat is far more energy-dense than leaves: a carcass holds this many times its body's energy store.
+pub const MEAT_DENSITY: f32 = 3.0;
 const KREST: f32 = 0.14;
 const KMOVE: f32 = 0.12;
 const SPEC_T: f32 = 0.26;
@@ -661,10 +663,52 @@ impl Sim {
         // animal numbers scale with the land, not the whole map (oceans feed no land animals)
         let area = (s.land as f32 / 58000.0).max(0.3);
         s.maxpop = 120.max((1200f32.min(300.0 * s.land as f32 / 58000.0)) as usize);
-        let founders: &[(Kind, usize)] =
-            if primordial { &[(Kind::Microbe, 90)] } else { &[(Kind::Herb, 70), (Kind::Omni, 3), (Kind::Carn, 10)] };
-        for &(kind, cnt) in founders {
+        // several founder species per kind, with colours spread around the wheel and different body plans,
+        // so a fresh world starts varied (one species per kind made the whole start one colour)
+        let founders: Vec<(Kind, usize, usize)> = if primordial {
+            vec![(Kind::Microbe, 90, 0)]
+        } else {
+            let mut v: Vec<(Kind, usize, usize)> = (0..5).map(|k| (Kind::Herb, 14, k)).collect();
+            v.push((Kind::Omni, 3, 0));
+            v.extend((0..2).map(|k| (Kind::Carn, 6, k)));
+            v
+        };
+        let hue0: f32 = s.rng.gen_range(0.0..360.0);
+        for (fi, &(kind, cnt, k)) in founders.iter().enumerate() {
             let mut b = base_genome(&mut s.rng, kind);
+            b.hue = (hue0 + fi as f32 * 360.0 / founders.len() as f32 + s.rng.gen_range(-15.0..15.0)).rem_euclid(360.0);
+            b.hue2 = (b.hue + s.rng.gen_range(-90.0..90.0)).rem_euclid(360.0);
+            b.pat = (fi % 6) as u8;
+            b.v[LUM] = s.rng.gen_range(0.3..0.8);
+            b.v[SAT] = s.rng.gen_range(0.25..0.8);
+            match (kind, k) {
+                // different ways of making a living from the start
+                (Kind::Herb, 1) => {
+                    b.v[SPD] = (b.v[SPD] + 0.25).min(1.3);
+                    b.v[SIZE] = (b.v[SIZE] * 0.8).max(2.5);
+                    b.v[EARS] = 0.8;
+                }
+                (Kind::Herb, 2) => {
+                    b.v[ARMOR] = 0.55;
+                    b.v[TAIL] = 0.6;
+                    b.v[SPD] = (b.v[SPD] - 0.15).max(0.35);
+                }
+                (Kind::Herb, 3) => {
+                    b.v[HORN] = 0.7;
+                    b.v[SOCIAL] = 0.85;
+                    b.q |= HERDER;
+                }
+                (Kind::Herb, 4) => {
+                    b.v[NECK] = 0.35;
+                    b.v[SIZE] = (b.v[SIZE] * 1.2).min(7.5);
+                }
+                (Kind::Carn, 1) => {
+                    b.v[STANCE] = 0.5;
+                    b.v[SOCIAL] = 0.8;
+                    b.v[SIZE] = (b.v[SIZE] * 0.85).max(4.0);
+                }
+                _ => {}
+            }
             if kind == Kind::Microbe && !microbes {
                 // no colonies: the first life is a small, simple, gill-breathing animal
                 b.v[COMPLEXITY] = 0.45;
@@ -1129,7 +1173,11 @@ impl Sim {
         let e0 = (0.10 + 0.25 * mom.g.v[CARE]) * mom.max_e;
         for (hd, nd) in sperm {
             // the population limit counts animals only; colonies have their own
-            if self.nanimals >= self.maxpop || (mom.g.v[DIET] <= 0.65 && self.nherb >= self.maxpop * 8 / 10) {
+            // plant-eaters may fill 80% of the limit; hunters hold territories and stop breeding at 30%
+            if self.nanimals >= self.maxpop
+                || (mom.g.v[DIET] <= 0.65 && self.nherb >= self.maxpop * 8 / 10)
+                || (mom.g.v[DIET] > 0.65 && self.nanimals - self.nherb >= self.maxpop * 3 / 10)
+            {
                 break;
             }
             let (hm, nm_) = gamete(&mut self.rng, &mom.hap.0, &mom.hap.1);
@@ -1173,7 +1221,7 @@ impl Sim {
             let id = self.nkid;
             self.nkid += 1;
             self.cor.push(Co {
-                id, x: c.x, y: c.y, e: MK * c.s.powi(3) * 120.0 + 4.0, ttl: 900.0, dead: false,
+                id, x: c.x, y: c.y, e: (MK * c.s.powi(3) * 120.0 + 4.0) * 2.0, ttl: 900.0, dead: false,
                 inf: c.sick.map(|s| s.0), size: c.s, col: c.col, buried: false, burial: 0.0, bone: None,
                 has_bones: c.g.v[COMPLEXITY] >= 0.42,
             });
@@ -1832,6 +1880,8 @@ impl Sim {
         let carn = g.v[DIET] > 0.4;
         // animals ready to breed find mates from farther away (calls, scent)
         let mate_r2 = if ready { v2 * 2.56 } else { v2 };
+        // a hunter in a pack dares to take bigger prey
+        let size_ok = 1.25 + if carn { 0.35 * self.pack_mates(c, 14.0).min(3) as f32 } else { 0.0 };
         let (gx0, gx1, gy0, gy1) = self.grid_range(x, y, mate_r2.sqrt());
         for gy in gy0..=gy1 {
             for gx in gx0..=gx1 {
@@ -1844,7 +1894,9 @@ impl Sim {
                     let mut d = dx * dx + dy * dy;
                     let og = &o.g;
                     // camouflage: bodies matching the ground are seen only up close (see `visibility`)
-                    d *= self.inv_seen2.get(oj as usize).copied().unwrap_or(1.0);
+                    let inv = self.inv_seen2.get(oj as usize).copied().unwrap_or(1.0);
+                    // keen eyes see through camouflage
+                    d *= if inv > 1.0 { 1.0 + (inv - 1.0) * (1.0 - 0.6 * g.v[EYES]) } else { inv };
                     if d > v2 {
                         if d < mate_r2 && ready && o.sp == sp && !o.male && o.preg.is_none() && o.cool <= 0 && d < md
                             && o.age >= mat_age(og) && o.e >= og.v[THRESH] * o.max_e * 0.7 {
@@ -1877,7 +1929,7 @@ impl Sim {
                             thr = Some(o.id);
                             td = d;
                         }
-                    } else if carn && o.s < cs * 1.25 && d < pd && dist(og, g) > 0.25 {
+                    } else if carn && o.s < cs * size_ok && d < pd && dist(og, g) > 0.25 {
                         // warning colours: predators avoid vivid prey as often as vivid prey has really been
                         // dangerous (lets harmless mimics profit too), unless starving
                         let hsh = ((c.id as u64).wrapping_mul(2654435761) ^ (o.id as u64).wrapping_mul(40503) ^ (self.t as u64 >> 7)) % 1000;
@@ -1890,7 +1942,8 @@ impl Sim {
                 }
             }
         }
-        let fr = if g.has(SKITTISH) { 1.0 } else { 0.75 - 0.35 * bold };
+        // flight distance: skittish and big-eared (good hearing) animals notice danger earlier
+        let fr = if g.has(SKITTISH) { 1.0 } else { 0.75 - 0.35 * bold } * (1.0 + 0.3 * g.v[EARS]);
         let thr = if thr.is_some() && td <= (vis * fr).powi(2) { thr } else { None };
         let mut tg = None;
         let hunger = c.e / c.max_e;
@@ -2425,7 +2478,7 @@ impl Sim {
             * therm
             * (1.0 + 0.25 * orn)
             * (1.0 + 0.12 * g.v[IMMUNE] + 0.12 * g.v[ARMOR] + 0.08 * g.v[FUR])
-            * (1.0 + 0.06 * g.v[STANCE] + 0.05 * g.v[NECK] + 0.05 * g.v[PLATES]);
+            * (1.0 + 0.06 * g.v[STANCE] + 0.05 * g.v[NECK] + 0.05 * g.v[PLATES] + 0.08 * g.v[JAWS]);
         cost *= 0.2 + 0.8 * g.v[COMPLEXITY];
         if c.z > 0.5 {
             cost *= 1.8 + g.v[SIZE] * 0.08;
@@ -2576,8 +2629,10 @@ impl Sim {
                         if !o.dead && (c.x - o.x).powi(2) + (c.y - o.y).powi(2) < ((c.s + o.s) * 0.5 + 1.5).powi(2) {
                             let mut alive = true;
                             if o.g.has(SPIKY) {
-                                c.e -= 6.0;
-                                if self.rr() < 0.4 {
+                                // spines hurt and deter, unless the hunter is armored itself
+                                let shield = c.g.v[ARMOR];
+                                c.e -= 6.0 * (1.0 - 0.8 * shield);
+                                if self.rr() < 0.4 * (1.0 - 0.6 * shield) {
                                     c.tgt = None;
                                     c.thr = None;
                                     alive = false;
@@ -2590,22 +2645,36 @@ impl Sim {
                                 self.fx.push(Fx { x: (c.x + ox) / 2.0, y: (c.y + oy) / 2.0 + 1.0, ttl: 12, kind: 1 });
                                 // pack hunting: kin predators close by cut off the escape
                                 let pack = self.pack_mates(c, 14.0).min(3) as f32;
+                                // herds defend themselves: mates nearby spot the attack and mob the hunter
+                                let herd = {
+                                    let o = &self.crs[oj];
+                                    if o.g.has(HERDER) || o.g.v[SOCIAL] > 0.5 { self.pack_mates(o, 7.0).min(6) as f32 } else { 0.0 }
+                                };
                                 let o = &self.crs[oj];
-                                let mut pk = 0.48 + 0.3 * (c.s / o.s - 0.9) + 0.08 * pack;
-                                // armor works on four legs; plates, horns and long necks change the odds; upright hunters grab
-                                pk *= 1.0 - 0.45 * o.g.v[ARMOR] * (1.0 - 0.6 * o.g.v[STANCE]);
-                                pk *= (1.0 - 0.15 * o.g.v[PLATES]) * (1.0 - 0.2 * o.g.v[HORN]);
+                                let mut pk = 0.48 + 0.3 * (c.s / o.s - 0.9) + 0.1 * pack;
+                                // Defences and the hunters' answers (an arms race):
+                                //   armor, thick hide, plates  <->  strong jaws (JAWS)
+                                //   herds                      <->  packs
+                                //   horns / tail clubs wound   <->  size
+                                let jaws = c.g.v[JAWS];
+                                let crack = 1.0 - 0.75 * jaws;
+                                pk *= 1.0 - 0.5 * o.g.v[ARMOR] * (1.0 - 0.6 * o.g.v[STANCE]) * crack;
+                                pk *= (1.0 - 0.2 * o.g.v[PLATES] * crack) * (1.0 - 0.2 * o.g.v[HORN]);
                                 pk += 0.06 * o.g.v[NECK] + 0.08 * c.g.v[STANCE];
                                 if o.g.has(THICK_HIDE) {
-                                    pk *= 0.55;
+                                    pk *= 1.0 - 0.45 * crack;
                                 }
+                                pk /= 1.0 + 0.12 * herd * (1.0 - 0.15 * pack);
                                 // horns and tail clubs hurt a predator that fails
                                 let wound = (0.03 * o.g.v[HORN] + if o.g.v[ARMOR] > 0.6 && o.g.v[TAIL] > 0.6 { 0.04 } else { 0.0 })
                                     * (o.s / c.s).min(2.0);
                                 if self.rr() < pk {
                                     let o = &self.crs[oj];
-                                    // first bites now; the rest of the carcass is eaten over the next ticks
-                                    c.e += (o.e * 0.45 + o.s * 6.0) * meat_eff(c.g.v[DIET]) * 1.15 * glut;
+                                    // Meat is energy-dense: the carcass is worth MEAT_DENSITY times the prey's body
+                                    // store. The first bites now; the rest stays on the carcass for the next ticks
+                                    // (shared with the pack and scavengers).
+                                    let meat = MEAT_DENSITY * (40.0 + 110.0 * MK * o.s.powi(3) + 0.5 * o.e);
+                                    c.e += meat * 0.4 * meat_eff(c.g.v[DIET]) * glut;
                                     let (kx, ky, ks) = (o.x, o.y, o.s);
                                     let osick = o.sick.map(|s| s.0);
                                     let venom = o.g.has(VENOMOUS);
@@ -2616,8 +2685,10 @@ impl Sim {
                                         }
                                     }
                                     if venom {
-                                        c.e -= 25.0;
-                                        if self.rr() < 0.25 {
+                                        // poison, unless the hunter's body copes with it
+                                        let resist = 1.0 - 0.85 * c.g.v[IMMUNE];
+                                        c.e -= 25.0 * resist;
+                                        if self.rr() < 0.25 * resist {
                                             c.e -= 20.0;
                                         }
                                     }
@@ -2627,7 +2698,7 @@ impl Sim {
                                         self.fx.push(Fx { x: kx + jx, y: ky + jy, ttl: 260, kind: 0 });
                                     }
                                     // parents bring meat to their young (juvenile hunters are too small to catch prey)
-                                    let share = (ks * 6.0 * meat_eff(c.g.v[DIET])).max(4.0);
+                                    let share = (meat * 0.08 * meat_eff(c.g.v[DIET])).max(4.0);
                                     for &kid in c.kids.iter() {
                                         if let Some(&kj) = self.idmap.get(&kid) {
                                             let k = &mut self.crs[kj];
@@ -2638,7 +2709,9 @@ impl Sim {
                                     }
                                     // the carcass keeps the meat: stay and feed on it
                                     if let Some(k) = self.cor.last_mut() {
-                                        k.e += ks * 15.0;
+                                        let _ = ks;
+                                        k.e = k.e.max(meat * 0.6);
+                                        k.ttl = k.ttl.max(1400.0);
                                         c.tgt = Some(Tgt::Corpse(k.id));
                                     } else {
                                         c.tgt = None;
@@ -3153,6 +3226,11 @@ let __t4 = std::time::Instant::now();
                     ("flight", can_fly(&c.g)),
                     ("swimming limbs", c.g.v[FINS] > 0.5),
                     ("complex animals", c.g.v[COMPLEXITY] > 0.65),
+                    // evolved, not inherited from the founders
+                    ("armored prey", c.gen >= 8 && c.g.v[DIET] < 0.3 && c.g.v[ARMOR] > 0.85),
+                    ("bone-crushing jaws", c.gen >= 8 && c.g.v[DIET] > 0.7 && c.g.v[JAWS] > 0.8),
+                    ("keen-eyed hunters", c.gen >= 8 && c.g.v[DIET] > 0.7 && c.g.v[EYES] > 0.95),
+                    ("giants", c.g.v[SIZE] > 12.0),
                 ] {
                     if reached && !self.milestones.contains(label) && !msgs.iter().any(|(l, _, _)| *l == label) {
                         msgs.push((label, self.species[c.sp as usize].name.clone(), c.col));

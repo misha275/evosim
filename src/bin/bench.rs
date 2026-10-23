@@ -33,6 +33,13 @@ fn main() {
               let ms = s.crs.iter().map(|c| c.g.v[evosim::genome::SIZE]).fold(0f32, f32::max);
               let avg = |k: usize| s.crs.iter().map(|c| c.g.v[k]).sum::<f32>() / s.crs.len().max(1) as f32;
               println!("   epoch med {} p90 {} max {} | size mean {:.1} max {:.1} | {}", q(0.5), q(0.9), ep.last().copied().unwrap_or(0), avg(evosim::genome::SIZE), ms, evosim::genome::EXTRA_REPORT.iter().map(|&(n,k)| format!("{}={:.2}", n, avg(k))).collect::<Vec<_>>().join(" ")); }
+            { use evosim::genome::*;
+              let mean = |f: &dyn Fn(&Cr) -> bool, k: usize| { let v: Vec<f32> = s.crs.iter().filter(|c| f(c)).map(|c| c.g.v[k]).collect(); v.iter().sum::<f32>() / v.len().max(1) as f32 };
+              let herb = |c: &Cr| c.g.v[DIET] < 0.45 && c.g.v[COMPLEXITY] >= 0.42;
+              let carn = |c: &Cr| c.g.v[DIET] > 0.65;
+              let hc: f32 = { let v: Vec<f32> = s.crs.iter().filter(|c| herb(c)).map(|c| c.consp).collect(); v.iter().sum::<f32>() / v.len().max(1) as f32 };
+              println!("   ARMS prey: armor {:.2} spd {:.2} ears {:.2} size {:.1} consp {:.2} | hunters: jaws {:.2} eyes {:.2} spd {:.2} size {:.1} immune {:.2}",
+                mean(&herb, ARMOR), mean(&herb, SPD), mean(&herb, EARS), mean(&herb, SIZE), hc, mean(&carn, JAWS), mean(&carn, EYES), mean(&carn, SPD), mean(&carn, SIZE), mean(&carn, IMMUNE)); }
             { let cons: f32 = s.crs.iter().map(|c| c.consp).sum::<f32>() / s.crs.len().max(1) as f32;
               println!("   conspicuousness {:.2} warning-colour trust {:.2}", cons, s.apo_trust); }
             println!("t {} pop {} plants {} land {} crowd {:.2} species {}/{} lineages {} tps {:.0}", s.t, s.crs.len(), s.nplants, s.land, s.crowd, s.alive_species(), s.species.len(), s.vegetation.lineages.len(), s.t as f32 / t0.elapsed().as_secs_f32());

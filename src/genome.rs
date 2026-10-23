@@ -4,7 +4,7 @@ use rand::Rng as _;
 use serde::{Deserialize, Serialize};
 use serde_big_array::BigArray;
 
-pub const NG: usize = 38;
+pub const NG: usize = 39;
 // gene indices
 pub const SPD: usize = 0;
 pub const SIZE: usize = 1;
@@ -49,21 +49,23 @@ pub const PLATES: usize = 35;
 pub const LUM: usize = 36;
 /// colour saturation (vivid = warning colours, dull = camouflage)
 pub const SAT: usize = 37;
+/// bite force and teeth: lets a hunter break armor, thick hide and plates
+pub const JAWS: usize = 38;
 
 pub const RANGE: [(f32, f32); NG] = [
     (0.35, 1.3), (0.1, 26.0), (10.0, 50.0), (0.0, 1.0), (0.6, 1.5), (0.55, 0.9), (2500.0, 7000.0), (0.3, 1.0),
     (0.03, 0.22), (300.0, 1100.0), (1.0, 3.0), (0.1, 0.9), (0.0, 1.0), (0.0, 1.0), (0.0, 1.0), (0.0, 1.0),
     (0.0, 1.0), (0.0, 1.0), (0.5, 0.95), (0.0, 1.0), (0.0, 1.0), (0.0, 1.0), (0.0, 1.0), (0.0, 1.0),
     (0.0, 1.0), (0.0, 1.0), (0.0, 1.0), (0.0, 1.0), (0.0, 1.0), (0.0, 1.0), (0.0, 1.0), (0.0, 1.0), (0.0, 1.0),
-    (0.0, 1.0), (0.0, 1.0), (0.0, 1.0), (0.0, 1.0), (0.0, 1.0),
+    (0.0, 1.0), (0.0, 1.0), (0.0, 1.0), (0.0, 1.0), (0.0, 1.0), (0.0, 1.0),
 ];
 pub const NAMES: [&str; NG] = [
     "spd", "size", "vis", "diet", "metab", "thresh", "life", "aggr", "mut", "mat", "litter", "tol", "care", "choosy",
     "bold", "social", "curio", "immune", "body", "ears", "horn", "tail", "legs", "eyes", "scavenge", "fur", "armor",
-    "complexity", "wings", "gills", "fins", "lungs", "burial", "neck", "stance", "plates", "lum", "sat",
+    "complexity", "wings", "gills", "fins", "lungs", "burial", "neck", "stance", "plates", "lum", "sat", "jaws",
 ];
 pub const DK: [usize; 15] = [SPD, SIZE, VIS, DIET, METAB, THRESH, LIFE, AGGR, TOL, COMPLEXITY, WINGS, GILLS, FINS, LUNGS, BURIAL];
-pub const VK: [usize; 13] = [BODY, EARS, HORN, TAIL, LEGS, EYES, FUR, ARMOR, NECK, STANCE, PLATES, LUM, SAT];
+pub const VK: [usize; 14] = [BODY, EARS, HORN, TAIL, LEGS, EYES, FUR, ARMOR, NECK, STANCE, PLATES, LUM, SAT, JAWS];
 /// genes summarised by the headless benchmark
 pub const EXTRA_REPORT: [(&str, usize); 7] = [("neck", NECK), ("stance", STANCE), ("plates", PLATES), ("lum", LUM), ("sat", SAT), ("armor", ARMOR), ("horn", HORN)];
 const LG: [&[usize]; 5] = [
@@ -96,7 +98,7 @@ fn up(k: usize) -> &'static str {
         LUNGS => "air breathing", BURIAL => "burial behavior", BODY => "rounder", EARS => "bigger ears", HORN => "horns",
         TAIL => "longer tail", LEGS => "longer legs", EYES => "bigger eyes", FUR => "thicker fur", ARMOR => "armored",
         SCAVENGE => "corpse-eater", NECK => "longer neck", STANCE => "upright stance", PLATES => "back plates",
-        LUM => "paler", SAT => "vivid colours", _ => "drift",
+        LUM => "paler", SAT => "vivid colours", JAWS => "stronger jaws", _ => "drift",
     }
 }
 fn down(k: usize) -> &'static str {
@@ -107,7 +109,7 @@ fn down(k: usize) -> &'static str {
         LUNGS => "reduced lungs", BURIAL => "reduced burial behavior", BODY => "sleeker", EARS => "smaller ears",
         HORN => "hornless", TAIL => "shorter tail", LEGS => "stubby legs", EYES => "smaller eyes", FUR => "thinner fur",
         ARMOR => "softer hide", SCAVENGE => "less scavenging", NECK => "shorter neck", STANCE => "four-legged",
-        PLATES => "smooth back", LUM => "darker", SAT => "dull colours", _ => "drift",
+        PLATES => "smooth back", LUM => "darker", SAT => "dull colours", JAWS => "weaker jaws", _ => "drift",
     }
 }
 
@@ -203,6 +205,7 @@ pub fn base_genome(r: &mut Rng, kind: Kind) -> Genome {
     v[PLATES] = uni(r, 0.0, 0.1);
     v[LUM] = uni(r, 0.35, 0.75);
     v[SAT] = uni(r, 0.35, 0.75);
+    v[JAWS] = uni(r, 0.0, 0.2);
     let pat = r.gen_range(0..6u8);
     let hue2 = (hue + uni(r, -90.0, 90.0)).rem_euclid(360.0);
     match kind {
@@ -233,6 +236,7 @@ pub fn base_genome(r: &mut Rng, kind: Kind) -> Genome {
             v[SPD] = uni(r, 0.8, 1.2);
             v[VIS] = uni(r, 28.0, 50.0);
             v[AGGR] = uni(r, 0.6, 1.0);
+            v[JAWS] = uni(r, 0.3, 0.55);
         }
     }
     Genome { v, hue, hue2, pat, q: 0, epoch: 0 }
@@ -396,14 +400,15 @@ pub fn trait_note(g: &Genome, rf: &Genome) -> String {
 
 /// How well a diet extracts energy from plants / from meat. Specialists do well; a middle diet
 /// (omnivory) gets little from either, so it is a fitness valley that is hard to cross.
-/// Specialists (diet <= 0.2 or >= 0.8) digest their food fully; in between both fall off steeply.
+/// Specialists (diet <= 0.15 or >= 0.85) digest their food fully; in between both fall off steeply, so a mixed
+/// diet gets little from either (at 0.5 about 6% from each): omnivory is a valley that is hard to cross.
 #[inline]
 pub fn plant_eff(diet: f32) -> f32 {
     meat_eff(1.0 - diet)
 }
 #[inline]
 pub fn meat_eff(diet: f32) -> f32 {
-    let u = ((diet - 0.2) / 0.6).clamp(0.0, 1.0);
+    let u = ((diet - 0.3) / 0.55).clamp(0.0, 1.0);
     (u * u * (3.0 - 2.0 * u)).powf(2.5)
 }
 
@@ -505,6 +510,9 @@ pub fn body_plan(g: &Genome) -> String {
         s.push_str("horned ");
     }
     let carn = g.v[DIET] > 0.6;
+    if carn && g.v[JAWS] > 0.75 {
+        s.push_str("bone-crushing ");
+    }
     let core = if can_fly(g) {
         "flyer"
     } else if aquatic(g) {

@@ -796,7 +796,9 @@ pub fn draw_cr(cv: &mut Canvas, c: &Cr, t: i64, dark: f32, cx: f32, cy: f32, wet
     let neck = g.v[NECK] * (0.5 + 0.5 * gr);
     let sep = big || biped || neck > 0.3;
     let hw = if big { 2.max((l as f32 * 0.22).round() as i32 + carn as i32) } else { 2 };
-    let hh = if big { 2.max((h as f32 * 0.5).round() as i32) } else { 2 };
+    // strong-jawed hunters have heavier heads
+    let heavy = carn && g.v[JAWS] > 0.6;
+    let hh = if big { 2.max((h as f32 * 0.5).round() as i32) + heavy as i32 } else { 2 };
     // (rear column, top row) of the head
     let (hx0, hy0) = if neck > 0.3 {
         let nl = (neck * (2.0 + l as f32 * 0.8)).round() as i32;
@@ -919,6 +921,11 @@ pub fn draw_cr(cv: &mut Canvas, c: &Cr, t: i64, dark: f32, cx: f32, cy: f32, wet
         // fangs (bared while hunting)
         let my = if sep { hy0 + hh - 1 } else { bbot };
         p.set(if sep { hxf } else { bx1 }, my, WHITE);
+        if heavy {
+            // a heavy lower jaw
+            p.set(if sep { hxf - 1 } else { bx1 - 1 }, my + 1, dk);
+            p.set(if sep { hxf } else { bx1 }, my + 1, dk);
+        }
         if c.act == 1 || c.act == 2 {
             p.set(if sep { hxf + 1 } else { bx1 + 1 }, my, WHITE);
         }

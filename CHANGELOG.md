@@ -1,5 +1,26 @@
 # Changelog
 
+## 2.8.0 - hunters and hunted
+- Meat is energy-dense: a kill is worth 3x the prey's body energy store (scaled by its mass), far more than a plant.
+  The hunter eats part at once; the rest stays on the carcass for the next hours (shared with the pack, the young and
+  scavengers). Natural deaths leave twice as much meat as before. Hunting now pays: predators hold about a quarter of
+  the animals instead of starving out.
+- Predators hold territories: they stop breeding at 30% of the population limit (plant-eaters at 80%), which keeps
+  them from wiping out their prey.
+- Omnivory is harder: diets at 0.15 or below and 0.85 or above digest fully; in between both fall off steeply
+  (a 50/50 diet gets ~6% from each).
+- Arms race - every defence has an answer, and both sides keep evolving:
+  - armor, thick hide, plates <-> new gene: jaws (bite force; costs energy, shown as a heavy lower jaw);
+  - camouflage <-> keen eyes (eye size lets a hunter see through camouflage, prey spot hidden hunters);
+  - herds (mates nearby mob the hunter) <-> packs (pack hunters succeed more and take prey up to 2.3x their size);
+  - spines <-> the hunter's own armor; venom <-> the hunter's immune system; big ears <-> earlier flight;
+  - speed <-> speed. New evolution milestones: armored prey, bone-crushing jaws, keen-eyed hunters, giants.
+- A fresh world starts with 5 herbivore species (a grazer, a fast big-eared one, an armored one, a horned herd
+  species, a long-necked browser), 2 hunter species and an omnivore, with colours spread around the colour wheel.
+  (Before, each kind was one species, so the whole start had one colour; camouflage then pulls colours towards the
+  ground - yellow-green grass, tan sand - which is why animals drift to warm hues over time.)
+- Saves from 2.7 cannot be loaded.
+
 ## 2.7.0 - a living planet
 - Tectonic plates (6-14 per world, with curved borders) drift and slowly change course. Where they collide,
   mountain ranges rise; where they part, rift valleys sink; where they slide past each other, earthquakes strike.
