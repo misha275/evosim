@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.8.1
+- Fix: the window froze (and Windows closed it) in long runs. The small phylogeny tree in the side panel was pruned
+  with a quadratic loop rebuilt every frame; with thousands of species a frame took seconds, the simulation starved
+  and the window stopped responding. The pruning now uses a heap (n log n) and keeps the 24 most notable branches,
+  which also makes the tree readable again.
+- Lava runs downhill in tongues instead of spreading as a square over level ground.
+
 ## 2.8.0 - hunters and hunted
 - Meat is energy-dense: a kill is worth 3x the prey's body energy store (scaled by its mass), far more than a plant.
   The hunter eats part at once; the rest stays on the carcass for the next hours (shared with the pack, the young and

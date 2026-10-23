@@ -613,7 +613,8 @@ impl Sim {
                         continue;
                     }
                     let j = ny as usize * w + nx as usize;
-                    if self.lava.contains_key(&(j as u32)) || self.elevation[j] > self.elevation[i].saturating_add(1) {
+                    // lava runs downhill in tongues; on level ground it creeps only now and then
+                    if self.lava.contains_key(&(j as u32)) || self.elevation[j] > self.elevation[i] || (self.elevation[j] == self.elevation[i] && self.rr() > 0.2) {
                         continue;
                     }
                     if best.map_or(true, |b| self.elevation[j] < self.elevation[b] || (self.elevation[j] == self.elevation[b] && self.rr() < 0.5)) {

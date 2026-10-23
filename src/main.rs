@@ -260,19 +260,40 @@ fn draw_mini_tree(s: &Sim, x0: f32, y0: f32, w: f32, h: f32) {
             p = sps[pp as usize].parent;
         }
     }
-    let kids_of = |vis: &std::collections::BTreeSet<usize>| {
-        let mut kids: std::collections::HashMap<Option<u32>, Vec<usize>> = Default::default();
-        for &i in vis {
-            kids.entry(sps[i].parent).or_default().push(i);
+    // Prune to the most notable branches: repeatedly drop the least notable leaf (extinct small branches first,
+    // then the smallest living ones). A heap keeps this O(n log n) - the old rebuild-per-removal loop was
+    // quadratic and froze the window once thousands of species had existed.
+    const KEEP: usize = 24;
+    let mut nkids: std::collections::HashMap<usize, usize> = Default::default();
+    for &i in &vis {
+        if let Some(p) = sps[i].parent {
+            *nkids.entry(p as usize).or_default() += 1;
         }
-        kids
+    }
+    let rank = |i: usize| -> (u8, i64, i64) {
+        if sps[i].pop == 0 { (0, sps[i].peak as i64, sps[i].born) } else { (1, sps[i].pop as i64, sps[i].born) }
     };
-    let mut kids = kids_of(&vis);
-    while vis.len() > 12 {
-        let leaves: Vec<usize> = vis.iter().copied().filter(|&i| sps[i].pop == 0 && !kids.contains_key(&Some(i as u32))).collect();
-        let Some(&d) = leaves.iter().min_by_key(|&&i| (sps[i].peak, sps[i].born)) else { break };
+    let mut heap: std::collections::BinaryHeap<std::cmp::Reverse<((u8, i64, i64), usize)>> =
+        vis.iter().copied().filter(|i| !nkids.contains_key(i)).map(|i| std::cmp::Reverse((rank(i), i))).collect();
+    while vis.len() > KEEP {
+        let Some(std::cmp::Reverse((_, d))) = heap.pop() else { break };
+        if !vis.contains(&d) || nkids.get(&d).copied().unwrap_or(0) > 0 {
+            continue;
+        }
         vis.remove(&d);
-        kids = kids_of(&vis);
+        if let Some(p) = sps[d].parent {
+            let p = p as usize;
+            let k = nkids.entry(p).or_default();
+            *k = k.saturating_sub(1);
+            if *k == 0 {
+                nkids.remove(&p);
+                heap.push(std::cmp::Reverse((rank(p), p)));
+            }
+        }
+    }
+    let mut kids: std::collections::HashMap<Option<u32>, Vec<usize>> = Default::default();
+    for &i in &vis {
+        kids.entry(sps[i].parent).or_default().push(i);
     }
     let mut order = vec![];
     let mut stack: Vec<usize> = kids.get(&None).cloned().unwrap_or_default();
@@ -287,7 +308,8 @@ fn draw_mini_tree(s: &Sim, x0: f32, y0: f32, w: f32, h: f32) {
         return;
     }
     let rh = 17.0f32.min((h - 8.0) / order.len() as f32);
-    let row = |i: usize| -> f32 { y0 + 6.0 + (order.iter().position(|&o| o == i).unwrap() as f32 + 0.5) * rh };
+    let pos: std::collections::HashMap<usize, usize> = order.iter().enumerate().map(|(k, &i)| (i, k)).collect();
+    let row = |i: usize| -> f32 { y0 + 6.0 + (pos[&i] as f32 + 0.5) * rh };
     let now = s.t.max(1) as f32;
     let xf = |t: i64| x0 + 6.0 + (w - 14.0) * t as f32 / now;
     for &i in &order {
