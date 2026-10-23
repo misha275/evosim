@@ -90,7 +90,7 @@ impl Biome {
             Biome::Glacier => [240, 245, 250],
         }
     }
-    fn ground(self) -> Col {
+    pub fn ground(self) -> Col {
         match self {
             Biome::Beach => [210, 196, 140],
             Biome::Desert => [214, 184, 120],
@@ -167,6 +167,8 @@ pub struct World {
     pub biome: Vec<u8>,
     pub springs: Vec<u32>,
     pub land: i64,
+    /// noise seed of this world (for re-colouring cells whose terrain changes later)
+    pub seed: u32,
 }
 
 // ------------------------------------------------------------------ noise
@@ -194,7 +196,7 @@ fn vnoise(x: f32, y: f32, seed: u32) -> f32 {
     ab + (cd - ab) * sy
 }
 
-fn fbm(x: f32, y: f32, oct: u32, seed: u32) -> f32 {
+pub(crate) fn fbm(x: f32, y: f32, oct: u32, seed: u32) -> f32 {
     let (mut s, mut amp, mut f, mut norm) = (0.0, 1.0, 1.0, 0.0);
     for o in 0..oct {
         s += vnoise(x * f, y * f, seed.wrapping_add(o * 1013)) * amp;
@@ -648,6 +650,7 @@ pub fn generate(w: usize, h: usize, map: MapType, rng: &mut Rng) -> World {
         biome: vec![0; n],
         springs,
         land: 0,
+        seed,
     };
     let sun = (-0.6f32, -0.75f32, 0.45f32); // light from the north-west, above
     let sl = (sun.0 * sun.0 + sun.1 * sun.1 + sun.2 * sun.2).sqrt();
@@ -769,4 +772,86 @@ pub fn generate(w: usize, h: usize, map: MapType, rng: &mut Rng) -> World {
     }
     PROGRESS.store(100, Ordering::Relaxed);
     out
+}
+
+/// Land biome for one cell from its height above sea (0..1), temperature, moisture and slope; the same rules
+/// as the generator uses (for cells whose terrain changes during the simulation).
+pub fn land_biome(seed: u32, x: usize, y: usize, land_h: f32, t: f32, moist: f32, slope: f32, coastal: bool) -> Biome {
+    let wob = (fbm(x as f32 / 16.0, y as f32 / 16.0, 3, seed ^ 0xb10e) - 0.5) * 0.16;
+    let (t, moist) = (t + wob * 0.6, moist + wob);
+    let snowline = 0.62 + 0.5 * (t - 0.3);
+    if land_h > snowline.max(0.45) || t < 0.07 {
+        Biome::Glacier
+    } else if land_h > 0.4 && slope > 0.9 || land_h > 0.6 {
+        Biome::Mountain
+    } else if land_h > 0.26 {
+        Biome::Alpine
+    } else if land_h < 0.0012 && coastal {
+        Biome::Beach
+    } else if t < 0.2 {
+        Biome::Tundra
+    } else if t < 0.36 {
+        if moist > 0.3 { Biome::Taiga } else { Biome::Tundra }
+    } else if t < 0.68 {
+        if moist < 0.17 {
+            Biome::Desert
+        } else if moist < 0.36 {
+            Biome::Grassland
+        } else if moist > 0.82 && land_h < 0.12 {
+            Biome::Swamp
+        } else {
+            Biome::TemperateForest
+        }
+    } else if moist < 0.24 {
+        Biome::Desert
+    } else if moist < 0.46 {
+        Biome::Savanna
+    } else if moist > 0.85 && land_h < 0.1 {
+        Biome::Swamp
+    } else {
+        Biome::Rainforest
+    }
+}
+
+/// Terrain class of a land biome: 0 soil, 2 rock, 3 sand.
+pub fn land_terr(b: Biome) -> u8 {
+    match b {
+        Biome::Mountain => 2,
+        Biome::Beach | Biome::Desert => 3,
+        _ => 0,
+    }
+}
+
+/// Ground colour of a land cell (as the generator draws it): flat biome colour, relief only on high ground.
+/// `shade` is the hill-shading factor (1 = flat).
+pub fn land_color(seed: u32, x: usize, y: usize, b: Biome, land_h: f32, shade: f32) -> Col {
+    let nz = (hash(x as i32, y as i32, seed ^ 0x5151) - 0.5) * 7.0;
+    let relief = smooth(0.16, 0.3, land_h);
+    let mut c = b.ground();
+    if b == Biome::Mountain {
+        c = mix(c, [150, 145, 140], ((land_h - 0.55) * 2.0).clamp(0.0, 1.0));
+    } else if b != Biome::Glacier {
+        c = mix(c, [140, 134, 118], relief * 0.45);
+    }
+    let k = 1.0 + (shade - 1.0) * (0.18 + 0.82 * relief);
+    [
+        (c[0] as f32 * k + nz).clamp(0.0, 255.0) as u8,
+        (c[1] as f32 * k + nz).clamp(0.0, 255.0) as u8,
+        (c[2] as f32 * k + nz * 0.8).clamp(0.0, 255.0) as u8,
+    ]
+}
+
+/// Sea colour for a depth 0..1 below sea level.
+pub fn sea_color(seed: u32, x: usize, y: usize, depth: f32, cold: bool) -> Col {
+    let nz = (hash(x as i32, y as i32, seed ^ 0x5151) - 0.5) * 7.0;
+    let mut c = mix([46, 116, 160], [14, 38, 86], depth.clamp(0.0, 1.0).sqrt());
+    if cold {
+        c = mix(c, [205, 225, 238], 0.7);
+    }
+    [(c[0] as f32 + nz).clamp(0.0, 255.0) as u8, (c[1] as f32 + nz).clamp(0.0, 255.0) as u8, (c[2] as f32 + nz * 0.8).clamp(0.0, 255.0) as u8]
+}
+
+/// Base soil fertility of a land cell.
+pub fn base_fertility(seed: u32, x: usize, y: usize, b: Biome, moist: f32) -> f32 {
+    (b.fertility() * (0.75 + 0.5 * moist) * (0.85 + 0.3 * hash(x as i32, y as i32, seed ^ 0x777))).min(1.0)
 }

@@ -1,5 +1,27 @@
 # Changelog
 
+## 2.7.0 - a living planet
+- Tectonic plates (6-14 per world, with curved borders) drift and slowly change course. Where they collide,
+  mountain ranges rise; where they part, rift valleys sink; where they slide past each other, earthquakes strike.
+  Colliding plates push their borders forward over time.
+- Old mountains wear down: high ground weathers (faster in rain), steep slopes slide into the valleys and enrich them.
+  Uplift balances erosion over the whole planet, so ranges grow in one place and fade in another while the share of
+  mountains and the land area stay about where they started.
+- Earthquakes happen on faults and crack the ground (one side of the fault rises); a quake can wake a volcano nearby.
+- Volcanoes sit on active faults (new ones are born now and then). They sleep for a long time, then erupt: lava runs
+  downhill, burns plants, kills animals that don't flee, and builds land where it reaches the sea; the cone grows;
+  big eruptions fill the sky with ash and cool the climate. Lava cools into dark barren rock that weathers into very
+  fertile volcanic soil. Animals flee lava like fire.
+- Floods: heavy rain makes rivers burst their banks; the low ground around them is under water for a while
+  (animals that can't swim get hurt and pushed out), then dries leaving fertile silt.
+- Cells whose height changes get their biome, terrain, temperature and colour re-derived (and dried flood water now
+  restores the proper ground instead of a generic green).
+- New map view `V` -> tectonic plates: plates and faults (red collide, blue part, yellow slide). The cursor info
+  shows lava, lava rock, floods, volcanoes and faults.
+- `cargo run --release --example planet -- <ticks> <seed> <prefix>` runs a world and saves maps at the start and the
+  end (plus an eruption close-up).
+- Saves from 2.6 cannot be loaded.
+
 ## 2.6.1
 - Faster on many-core CPUs: the single-threaded share of a simulation step is roughly halved.
   - Creature movement, growth and the energy bill run in parallel together with perception (each creature has its own

@@ -10,6 +10,9 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
+mod geology;
+pub use geology::{Fault, Plate, Volcano, PB};
+
 pub const DAY: i64 = 2400;
 pub const SEASON: i64 = DAY * 6;
 pub const CH: usize = 8;
@@ -452,6 +455,36 @@ pub struct Sim {
     /// biome per cell (worldgen::Biome)
     pub biome: Vec<u8>,
     pub pools: FxHashMap<u32, f32>,
+    // ---- living planet (see geology.rs)
+    /// noise seed of the world (for re-colouring changed cells)
+    pub wseed: u32,
+    pub plates: Vec<Plate>,
+    /// plate id per PB x PB block
+    pub plate_map: Vec<u8>,
+    #[serde(skip)]
+    pub boundaries: Vec<geology::Boundary>,
+    /// fault kind per block (0 none, else `Fault as u8`), for the tectonic map
+    #[serde(skip)]
+    pub fault_of: Vec<u8>,
+    /// smooth per-cell offsets bending plate borders (rebuilt, not saved)
+    #[serde(skip)]
+    pub warp: Vec<(i8, i8)>,
+    pub volcanoes: Vec<Volcano>,
+    /// molten lava cells and their heat (0..1)
+    pub lava: FxHashMap<u32, f32>,
+    #[serde(skip)]
+    pub lchunk: FxHashMap<u32, Vec<u32>>,
+    /// fresh lava rock weathering into soil (ticks left)
+    pub basalt: FxHashMap<u32, i32>,
+    #[serde(skip)]
+    geo_dirty: Vec<u32>,
+    #[serde(skip)]
+    water_changed: bool,
+    flood_cool: i64,
+    /// land area and high ground at the start, and the current uplift gain balancing them
+    geo_land0: i64,
+    geo_high0: i64,
+    uplift: f32,
     pub terr: Vec<u8>,
     pub fert: Vec<f32>,
     pub tmp: Vec<u8>,
@@ -578,6 +611,22 @@ impl Sim {
             elevation: vec![],
             moisture: vec![],
             springs: vec![],
+            wseed: 0,
+            plates: Vec::new(),
+            plate_map: Vec::new(),
+            boundaries: Vec::new(),
+            fault_of: Vec::new(),
+            warp: Vec::new(),
+            volcanoes: Vec::new(),
+            lava: FxHashMap::default(),
+            lchunk: FxHashMap::default(),
+            basalt: FxHashMap::default(),
+            geo_dirty: Vec::new(),
+            water_changed: false,
+            flood_cool: 0,
+            geo_land0: 0,
+            geo_high0: 0,
+            uplift: 1.0,
             biome: vec![],
             pools: FxHashMap::default(),
             terr: vec![0; n],
@@ -682,6 +731,15 @@ impl Sim {
         self.idmap = self.crs.iter().enumerate().map(|(i, c)| (c.id, i)).collect();
         self.kmap = self.cor.iter().enumerate().map(|(i, c)| (c.id, i)).collect();
         self.vegetation.rebuild_trees(&self.pl);
+        if !self.plates.is_empty() {
+            self.build_warp();
+        }
+        self.rebuild_boundaries();
+        let mut lc: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
+        for &k in self.lava.keys() {
+            lc.entry(self.chunk(k as usize) as u32).or_default().push(k);
+        }
+        self.lchunk = lc;
         self.bg_version += 1;
     }
 
@@ -758,6 +816,7 @@ impl Sim {
         self.biome = wd.biome;
         self.springs = wd.springs;
         self.land = wd.land;
+        self.wseed = wd.seed;
         // initial vegetation near carrying capacity, denser on fertile soil
         for i in 0..self.n {
             if self.terr[i] == 0 && self.rng.gen::<f32>() < 0.16 * self.fert[i] {
@@ -766,6 +825,8 @@ impl Sim {
                 self.setp(i, 3, Some(0));
             }
         }
+        self.init_geology();
+        self.geo_dirty.clear();
     }
 
     /// Local temperature without weather shading: climate + season (seasons are stronger in the cold north).
@@ -843,8 +904,9 @@ impl Sim {
                 }
                 self.terr[i] = 0;
                 self.land += 1;
-                self.fert[i] = self.fert[i].max(0.35);
-                self.bg[i] = [80, 92, 56];
+                // receding water leaves fertile silt
+                self.fert[i] = (self.fert[i] + 0.1).clamp(0.35, 1.0);
+                self.refresh_cell(i);
                 self.bg_version += 1;
             }
         }
@@ -1426,8 +1488,9 @@ impl Sim {
                 if gx < 0 || gy < 0 || gx >= self.cwc as i64 || gy >= self.chc as i64 {
                     continue;
                 }
-                if let Some(v) = self.fchunk.get(&((gy as usize * self.cwc + gx as usize) as u32)) {
-                    for &i in v {
+                let ck = (gy as usize * self.cwc + gx as usize) as u32;
+                for &i in self.fchunk.get(&ck).into_iter().flatten().chain(self.lchunk.get(&ck).into_iter().flatten()) {
+                    {
                         let dx = (i as usize % self.w) as f32 - x;
                         let dy = (i as usize / self.w) as f32 - y;
                         let d = dx * dx + dy * dy;
@@ -1649,7 +1712,8 @@ impl Sim {
     }
 
     pub fn earthquake(&mut self, at: Option<(i32, i32, i32)>) {
-        let (x, y, radius) = at.unwrap_or_else(|| {
+        let site = at.or_else(|| self.fault_quake_site());
+        let (x, y, radius) = site.unwrap_or_else(|| {
             (
                 self.rng.gen_range(1..self.w as i32 - 1),
                 self.rng.gen_range(1..self.h as i32 - 1),
@@ -1685,6 +1749,9 @@ impl Sim {
             self.setp(i, 0, None);
             self.fert[i] *= 0.8;
             self.bg[i] = [100, 87, 65];
+        }
+        if !self.plates.is_empty() {
+            self.fault_scarp(x, y, radius);
         }
         self.bg_version += 1;
     }
@@ -2126,7 +2193,7 @@ impl Sim {
         let (x, y) = (c.x, c.y);
         let idx = y as usize * self.w + x as usize;
         let temp = self.atmosphere.temperature(&self.tmp, self.d_t, self.w, idx);
-        if self.fchunk.is_empty() {
+        if self.fchunk.is_empty() && self.lchunk.is_empty() {
             c.fv = None;
         } else if self.every(3, c.id as i64) {
             c.fv = self.fire_near(x, y, 28.0);
@@ -2375,6 +2442,9 @@ impl Sim {
         c.e -= cost * dtf;
         if c.z <= 0.5 && !self.fire.is_empty() && self.fire.contains_key(&(nidx as u32)) {
             c.e -= c.max_e * 0.08 * dtf;
+        }
+        if c.z <= 0.5 && !self.lava.is_empty() && self.lava.contains_key(&(nidx as u32)) {
+            c.e -= c.max_e * 0.3 * dtf;
         }
         Plan {
             age: c.age, pf: c.pf, s: c.s, m34: c.m34, max_e: c.max_e, nut: c.nut, de: c.e - c0.e, thr: c.thr, tgt: c.tgt,
@@ -2909,6 +2979,7 @@ let __t0 = std::time::Instant::now();
                 self.banner = None;
             }
         }
+        self.geology_step();
 let __t1 = std::time::Instant::now();
         self.grow_plants();
         let regen = self.nutrient_regen() * dtf;

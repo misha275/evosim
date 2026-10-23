@@ -37,8 +37,12 @@ Large maps take a while to generate (a progress screen is shown; `planet` ~10–
    and soil moisture decide which plants can grow and how much animals spend on staying warm or cool.
    The world starts with pioneer plants adapted to each climate band; animal numbers scale with the land area.
 
+The planet keeps changing: tectonic plates drift, mountains rise where plates collide and wear down elsewhere,
+earthquakes strike along faults, volcanoes erupt (lava, ash winters, new land, fertile volcanic soil) and heavy rain
+floods the land around rivers.
+
 `V` cycles the map view: terrain (hill-shaded relief), **temperature** (live, including the season), soil moisture, biomes,
-elevation — with a legend. Hovering the map shows biome, °C, moisture, elevation and fertility under the cursor.
+elevation, tectonic plates — with a legend. Hovering the map shows biome, °C, moisture, elevation and fertility under the cursor.
 `cargo run --release --example terrain -- 1600 1060 <seed> [biome|temp|moist] <continents|pangaea|archipelago>` renders a
 map to `terrain.png`.
 

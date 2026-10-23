@@ -18,10 +18,11 @@ pub enum MapMode {
     Moisture,
     Biome,
     Elevation,
+    Tectonics,
 }
 
 impl MapMode {
-    pub const ALL: [MapMode; 5] = [MapMode::Terrain, MapMode::Temperature, MapMode::Moisture, MapMode::Biome, MapMode::Elevation];
+    pub const ALL: [MapMode; 6] = [MapMode::Terrain, MapMode::Temperature, MapMode::Moisture, MapMode::Biome, MapMode::Elevation, MapMode::Tectonics];
     pub fn name(self) -> &'static str {
         match self {
             MapMode::Terrain => "terrain",
@@ -29,6 +30,7 @@ impl MapMode {
             MapMode::Moisture => "soil moisture",
             MapMode::Biome => "biomes",
             MapMode::Elevation => "elevation",
+            MapMode::Tectonics => "tectonic plates",
         }
     }
     pub fn next(self) -> MapMode {
@@ -51,6 +53,8 @@ pub fn ramp(stops: &[Col], t: f32) -> Col {
 
 pub const TEMP_RAMP: [Col; 6] = [[40, 60, 170], [70, 160, 230], [120, 210, 160], [235, 225, 90], [240, 140, 50], [200, 40, 40]];
 pub const MOIST_RAMP: [Col; 5] = [[170, 120, 60], [215, 195, 110], [120, 180, 90], [40, 130, 110], [30, 70, 170]];
+/// Fault colours on the tectonic map: converging, spreading, sliding.
+pub const FAULT_COLS: [Col; 3] = [[215, 70, 50], [60, 130, 230], [230, 200, 60]];
 pub const ELEV_RAMP: [Col; 6] = [[70, 140, 80], [150, 180, 95], [215, 200, 120], [165, 120, 80], [140, 130, 125], [250, 250, 250]];
 
 /// Temperature in degrees C shown for a 0..1 climate value.
@@ -92,6 +96,20 @@ pub fn overlay_color(s: &Sim, i: usize, mode: MapMode) -> Col {
         MapMode::Biome => {
             let b = crate::worldgen::Biome::from_u8(s.biome.get(i).copied().unwrap_or(6));
             shade(b.map_col())
+        }
+        MapMode::Tectonics => {
+            if s.plate_map.is_empty() {
+                return s.bg[i];
+            }
+            let b = s.plate_block(i);
+            let pc = s.plates.get(s.plate_map[b] as usize).map_or([128, 128, 128], |p| p.col);
+            let c = match s.fault_near(i, 3) {
+                1 => FAULT_COLS[0],
+                2 => FAULT_COLS[1],
+                3 => FAULT_COLS[2],
+                _ => pc,
+            };
+            if water { mix(c, [20, 40, 90], 0.45) } else { shade(c) }
         }
         MapMode::Elevation => {
             let m = metres(s.elevation[i]);
@@ -1103,6 +1121,45 @@ impl WorldRenderer {
         }
         for &i in s.fire.keys() {
             cv.set((i as usize % s.w) as i32, (i as usize / s.w) as i32, [255, (120 + (s.t + i as i64) % 120) as u8, 35]);
+        }
+        // molten lava: white-yellow when fresh, dull red as it cools, flickering
+        for (&i, &heat) in &s.lava {
+            let (x, y) = ((i as usize % s.w) as i32, (i as usize / s.w) as i32);
+            if !inside(x, y) {
+                continue;
+            }
+            let fl = ((s.t / 3 + i as i64 * 7) % 5) as f32 / 5.0;
+            let c = mix([150, 30, 18], [255, 215, 90], (heat * 0.9 + fl * 0.2).min(1.0));
+            cv.set(x, y, c);
+        }
+        for v in &s.volcanoes {
+            if !inside(v.x, v.y) {
+                continue;
+            }
+            // crater
+            let rim = [70, 60, 56];
+            cv.fill(v.x - 1, v.y - 1, 3, 1, rim);
+            cv.fill(v.x - 1, v.y + 1, 3, 1, rim);
+            cv.set(v.x - 1, v.y, rim);
+            cv.set(v.x + 1, v.y, rim);
+            if v.erupt > 0 {
+                cv.set(v.x, v.y, [255, 230, 120]);
+                // smoke and ash column drifting with the wind
+                let n = (10.0 + 8.0 * v.power) as i64;
+                for k in 0..n {
+                    let age = (s.t / 2 + k * 5) % (n * 5);
+                    let up = (age / 3) as i32;
+                    let drift = (age as f32 * 0.12 * if (v.x / 7) % 2 == 0 { 1.0 } else { -1.0 }) as i32;
+                    let wob = ((age + k) % 3) as i32 - 1;
+                    let g = (150 - (age as i32).min(90)) as u8;
+                    cv.blend(v.x + drift + wob, v.y - 2 - up, 2, 2, [g, g, g.saturating_add(4)], 150);
+                }
+                if (s.t / 4) % 3 == 0 {
+                    cv.set(v.x + ((s.t / 4) % 3) as i32 - 1, v.y - 2, [255, 160, 60]);
+                }
+            } else {
+                cv.set(v.x, v.y, [40, 34, 32]);
+            }
         }
         // trees: visible ones, back to front
         let mut trees: Vec<u32> = if mode != MapMode::Terrain { Vec::new() } else { s

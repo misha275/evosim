@@ -2,7 +2,7 @@
 //! The simulation runs on its own thread (with rayon for perception/plant sweeps);
 //! the GPU scales the native-resolution world image and draws the UI.
 use evosim::genome::*;
-use evosim::render::{celsius, metres, plant_sprite, portrait, MapMode, WorldRenderer, ELEV_RAMP, MOIST_RAMP, TEMP_RAMP};
+use evosim::render::{celsius, metres, plant_sprite, portrait, MapMode, WorldRenderer, ELEV_RAMP, FAULT_COLS, MOIST_RAMP, TEMP_RAMP};
 use evosim::worldgen::{Biome, MapType};
 use evosim::save::*;
 use evosim::sim::*;
@@ -1029,6 +1029,24 @@ fn draw_main(app: &mut App, s: &Sim, recompose: bool) {
             let i = wy as usize * s.w + wx as usize;
             let b = Biome::from_u8(s.biome.get(i).copied().unwrap_or(6));
             let plant = if s.pl[i] > 0 { format!(" | {}", s.vegetation.lineage(i).form().name()) } else { String::new() };
+            // what the ground is doing
+            let geo = if s.lava.contains_key(&(i as u32)) {
+                " | LAVA".to_string()
+            } else if s.basalt.contains_key(&(i as u32)) {
+                " | fresh lava rock".to_string()
+            } else if s.pools.contains_key(&(i as u32)) {
+                " | flooded".to_string()
+            } else if let Some(v) = s.volcanoes.iter().find(|v| (v.x - wx as i32).pow(2) + (v.y - wy as i32).pow(2) <= 16) {
+                format!(" | volcano {}{}", v.name, if v.erupt > 0 { " (ERUPTING)" } else { "" })
+            } else {
+                match s.fault_near(i, 4) {
+                    1 => " | plates collide here".to_string(),
+                    2 => " | plates part here".to_string(),
+                    3 => " | plates slide here".to_string(),
+                    _ => String::new(),
+                }
+            };
+            let plant = plant + &geo;
             let info = format!(
                 "{} | {:.1} C | soil moisture {:.0}% | {:.0} m | fertility {:.0}%{}",
                 b.name(), celsius(s.temp_at(i)), s.moisture[i] as f32 / 2.55, metres(s.elevation[i]), s.fert[i] * 100.0, plant
@@ -1075,6 +1093,12 @@ fn draw_legend(mode: MapMode, mw: f32) {
     let (x0, y0, wl) = (mw - 250.0, 10.0, 236.0);
     let rows: Vec<(String, evosim::util::Col)> = match mode {
         MapMode::Biome => (3..evosim::worldgen::NBIOMES as u8).map(|b| (Biome::from_u8(b).name().to_string(), Biome::from_u8(b).map_col())).collect(),
+        MapMode::Tectonics => vec![
+            ("plates collide (mountains)".to_string(), FAULT_COLS[0]),
+            ("plates part (rifts)".to_string(), FAULT_COLS[1]),
+            ("plates slide (quakes)".to_string(), FAULT_COLS[2]),
+            ("each plate has its own colour".to_string(), [150, 150, 150]),
+        ],
         _ => vec![],
     };
     let hgt = if rows.is_empty() { 52.0 } else { 26.0 + rows.len() as f32 * 15.0 };
